@@ -1,7 +1,7 @@
 {
   "name": "soundwave-backend",
-  "version": "1.0.0",
-  "description": "SoundWave local backend for Midtrans payment (demo kampus, 100% gratis)",
+  "version": "2.0.0",
+  "description": "Backend Express untuk aplikasi tiket konser SoundWave: checkout atomik, Midtrans Sandbox, tiket QR Ed25519, dan refund.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

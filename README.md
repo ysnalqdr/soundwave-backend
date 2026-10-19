@@ -63,7 +63,7 @@ npm run tunnel     # server + Cloudflare Quick Tunnel
 
 ## Endpoint
 
-Ada 26 rute. Tiga di antaranya warisan fitur denah kursi yang sudah dihapus dari aplikasi.
+Ada 23 rute. Semua rute yang diawali `/admin/` wajib membawa header `Authorization` berisi kata `Bearer` diikuti ID token Firebase milik akun ber-role `admin` atau `super_admin`. Tanpa token, jawabannya 401.
 
 | Kelompok | Rute | Fungsi |
 |---|---|---|
@@ -90,15 +90,13 @@ Ada 26 rute. Tiga di antaranya warisan fitur denah kursi yang sudah dihapus dari
 | | `POST /admin/promo` | Tambah atau ubah kode promo |
 | | `DELETE /admin/promo/:id` | Hapus kode promo |
 | Gerbang | `POST /sync-offline-scans` | Unggah hasil pindai offline saat perangkat kembali online |
-| Warisan | `GET /seat-layout/:idKonser` | Sisa denah kursi, tidak dipanggil aplikasi |
-| | `POST /reserve-seats` | Sisa denah kursi, tidak dipanggil aplikasi |
-| | `DELETE /release-seats` | Sisa denah kursi, tidak dipanggil aplikasi |
 
 ## Modul
 
 | Berkas | Isi |
 |---|---|
 | `server.js` | Rute, transaksi stok, verifikasi webhook, tanda tangan tiket Ed25519 |
+| `auth_admin.js` | Penjaga rute `/admin/*`: verifikasi ID token, lalu cek peran di `users/{uid}` |
 | `logger.js` | Tampilan konsol. Tanpa dependency, warna mati otomatis saat output masuk berkas |
 | `notifikasi.js` | Satu jalur untuk inbox Firestore dan push FCM |
 | `pengumuman.js` | Pengumuman manual ke pengguna |
@@ -119,6 +117,7 @@ node test_refund_flow.js        # pengajuan sampai keputusan admin
 node test_notifikasi.js         # inbox Firestore
 node test_push.js               # push FCM
 ```
+`test_refund_flow.js` menguji rute `/admin/*`, jadi butuh dua hal: `FIREBASE_WEB_API_KEY` terisi di `.env` dan minimal satu user ber-role `admin`. Tanpa keduanya, skrip itu berhenti dengan pesan lewat, bukan gagal.
 
 ## Keamanan
 
@@ -126,14 +125,14 @@ node test_push.js               # push FCM
 - Webhook Midtrans diverifikasi signature SHA512 sebelum status pesanan diubah.
 - Tiket ditandatangani Ed25519 dan diverifikasi di HP, tanpa bertanya ke server.
 - Kunci yang pernah bocor harus dirotasi di dashboard Midtrans. Menghapusnya dari berkas tidak menghapusnya dari riwayat git.
-- Rute `/admin/*` belum punya autentikasi. Jangan buka backend ini ke internet terbuka sebelum itu ditambahkan.
+- Rute `/admin/*` dijaga `auth_admin.js`. Token diverifikasi ke Firebase, lalu peran dibaca dari `users/{uid}`. Tanpa token 401, tanpa role admin 403.
 
 ## Batasan yang diketahui
 
 - Firestore Spark membatasi 20.000 tulis dan 50.000 baca per hari.
 - Quick Tunnel berganti alamat setiap kali dijalankan ulang. Aplikasi membaca alamat terbaru dari `events/_backend_config`.
 - Satu instance, tanpa antrean. Cukup untuk demo, bukan untuk lonjakan penjualan.
-- Belum ada autentikasi di rute admin.
+- Rute pengguna seperti `/checkout-atomic` dan `/request-refund` belum memverifikasi identitas pemanggil. `userId` masih dibaca dari body permintaan.
 
 ## Lisensi
 
