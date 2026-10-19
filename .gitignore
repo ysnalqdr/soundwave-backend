@@ -3,3 +3,6 @@ node_modules/
 serviceAccountKey.json
 serviceAccountKey.min.json
 *.json.min
+cloudflared.exe
+*.log
+config.yml

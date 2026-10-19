@@ -1,98 +1,140 @@
-# 🎵 SoundWave Backend Lokal
+# SoundWave Backend
 
-Backend Node.js lokal untuk SoundWave — menggantikan Firebase Cloud Functions supaya **100% gratis** (tanpa Blaze plan).
+Backend Express yang memegang semua keputusan uang di aplikasi SoundWave: memotong stok, membuat tagihan Midtrans, menerima webhook pembayaran, menerbitkan tiket bertanda tangan, dan menerima hasil pindai gerbang.
+
+Aplikasi Flutter membaca Firestore langsung untuk tampilan. Semua yang menyangkut harga, stok, dan status pesanan lewat sini. Server key Midtrans dan service account Firebase hanya ada di proses ini, tidak pernah di APK.
+
+Cloud Functions tidak dipakai karena project berjalan di Firebase Spark. Backend kecil di laptop ditambah Cloudflare Quick Tunnel memberi hasil yang sama dengan biaya Rp 0.
+
+Aplikasi kliennya ada di [ysnalqdr/soundwave](https://github.com/ysnalqdr/soundwave).
+
+## English Summary
+
+Express backend for the SoundWave concert ticketing app. It owns stock deduction, Midtrans charges, webhook verification, ticket signing, and gate scan sync. The Flutter client reads Firestore directly for display but never writes anything money related. Runs on a laptop behind a Cloudflare Quick Tunnel, so the whole stack costs nothing.
+
+## Peran di sistem
+
+| Bagian | Tanggung jawab |
+|---|---|
+| APK Flutter | Menampilkan data dan mengirim niat beli. Tidak memutuskan harga atau stok |
+| Backend ini | Satu-satunya pemegang server key Midtrans dan service account Firebase |
+| Firestore | Sumber kebenaran stok, harga, dan status pesanan |
+| Midtrans Sandbox | Membuat tagihan dan mengirim notifikasi pembayaran |
 
 ## Prasyarat
 
-- **Node.js 18+** → [download](https://nodejs.org/)
-- **Akun Midtrans Sandbox** → [daftar gratis](https://dashboard.sandbox.midtrans.com/register)
-- **Firebase Service Account Key** → dari Firebase Console
+- Node.js 18 atau lebih baru
+- Akun Midtrans Sandbox
+- Service account Firebase untuk project yang sama dengan aplikasi
 
----
+## Menjalankan
 
-## Setup (Sekali Saja)
-
-### 1. Install dependencies
 ```bash
-cd "D:\Projects\Big Projects\soundwave-backend"
 npm install
+copy .env.example .env      # Windows
+cp .env.example .env        # macOS / Linux
 ```
 
-### 2. Buat file `.env`
+Isi `.env`:
+
+| Variabel | Wajib | Keterangan |
+|---|---|---|
+| `PORT` | tidak | Default `3000` |
+| `MIDTRANS_SERVER_KEY` | ya | Server key Sandbox. Tidak boleh ada di aplikasi |
+| `MIDTRANS_CLIENT_KEY` | ya | Client key Sandbox, dipakai Snap |
+| `MIDTRANS_IS_PRODUCTION` | tidak | `false` untuk Sandbox |
+| `FIREBASE_SERVICE_ACCOUNT` | ya | Path ke `serviceAccountKey.json` |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | alternatif | Isi service account sebagai satu baris JSON, untuk platform tanpa berkas |
+| `FIREBASE_PROJECT_ID` | tidak | Kalau kosong, diambil dari service account |
+| `RESERVATION_HOLD_MINUTES` | tidak | Default `5`. Harus sama dengan `AppConstants.reservationHoldMinutes` |
+| `BASE_URL` | tidak | Alamat publik untuk callback dan tautan invoice |
+| `GOPAY_CALLBACK_URL` | tidak | Callback khusus GoPay |
+| `LOG_VERBOSE` | tidak | `1` untuk log verbose |
+
+Jalankan:
+
 ```bash
-copy .env.example .env
-```
-Lalu edit `.env`:
-
-### 3. Isi Midtrans Sandbox Keys
-Buka: https://dashboard.sandbox.midtrans.com/settings/config_info
-
-Copy **Server Key** dan **Client Key** ke `.env`:
-```
-MIDTRANS_SERVER_KEY=xxxxxxxx
-MIDTRANS_CLIENT_KEY=xxxxxxxx
+npm start          # server saja
+npm run dev        # server dengan watch
+npm run tunnel     # server + Cloudflare Quick Tunnel
 ```
 
-### 4. Download Firebase Service Account Key
-1. Buka: https://console.firebase.google.com/project/flutter-firebase-konser-apps/settings/serviceaccounts/adminsdk
-2. Klik **"Generate New Private Key"**
-3. Simpan file JSON-nya sebagai `serviceAccountKey.json` di folder ini
-4. Pastikan `.env` berisi:
-```
-FIREBASE_SERVICE_ACCOUNT=./serviceAccountKey.json
-```
+`npm run tunnel` memeriksa dulu apakah port 3000 sudah dipakai. Kalau belum, server dinyalakan, lalu cloudflared dijalankan dan alamat `https://xxx.trycloudflare.com` ditulis ke dokumen `events/_backend_config` supaya aplikasi tahu alamat backend yang sedang berlaku.
 
-### 5. Jalankan
+## Endpoint
+
+Ada 26 rute. Tiga di antaranya warisan fitur denah kursi yang sudah dihapus dari aplikasi.
+
+| Kelompok | Rute | Fungsi |
+|---|---|---|
+| Dasar | `GET /` | Daftar rute dan status server |
+| Checkout | `POST /checkout-atomic` | Potong stok dan tulis pesanan `RESERVED` dalam satu transaksi |
+| | `POST /validate-promo` | Periksa kode promo dan hitung potongan di server |
+| | `GET /check-status/:orderId` | Status pesanan untuk layar pembayaran |
+| | `GET /invoice/:orderId` | Halaman invoice yang bisa dibuka di browser |
+| Pembayaran | `POST /create-transaction` | Transaksi Midtrans Snap |
+| | `POST /create-va` | Virtual account |
+| | `POST /create-qris` | QRIS |
+| | `POST /create-gopay` | GoPay |
+| | `POST /midtrans-webhook` | Notifikasi pembayaran dari Midtrans, diverifikasi SHA512 |
+| | `POST /poll-payment` | Tanya status langsung ke Midtrans bila webhook terlambat |
+| | `POST /sweep-expired` | Lepas stok pesanan yang lewat 5 menit |
+| | `POST /settle-dev` | Tandai lunas di lingkungan pengembangan |
+| Refund | `POST /request-refund` | Pengajuan refund dari pengguna |
+| | `POST /approve-refund` | Setujui refund |
+| | `POST /reject-refund` | Tolak refund |
+| | `GET /admin/refunds` | Daftar pengajuan untuk admin |
+| | `POST /admin/refund/approve` | Persetujuan dari panel admin |
+| | `POST /admin/refund/reject` | Penolakan dari panel admin |
+| Promo | `GET /admin/promos` | Daftar kode promo |
+| | `POST /admin/promo` | Tambah atau ubah kode promo |
+| | `DELETE /admin/promo/:id` | Hapus kode promo |
+| Gerbang | `POST /sync-offline-scans` | Unggah hasil pindai offline saat perangkat kembali online |
+| Warisan | `GET /seat-layout/:idKonser` | Sisa denah kursi, tidak dipanggil aplikasi |
+| | `POST /reserve-seats` | Sisa denah kursi, tidak dipanggil aplikasi |
+| | `DELETE /release-seats` | Sisa denah kursi, tidak dipanggil aplikasi |
+
+## Modul
+
+| Berkas | Isi |
+|---|---|
+| `server.js` | Rute, transaksi stok, verifikasi webhook, tanda tangan tiket Ed25519 |
+| `logger.js` | Tampilan konsol. Tanpa dependency, warna mati otomatis saat output masuk berkas |
+| `notifikasi.js` | Satu jalur untuk inbox Firestore dan push FCM |
+| `pengumuman.js` | Pengumuman manual ke pengguna |
+| `start_tunnel.js` | Nyalakan server, buka tunnel, simpan alamat publik ke Firestore |
+| `reconcile_refund_orders.js` | Perbaiki pesanan yang statusnya tidak sinkron setelah refund |
+| `diag_qris.js` | Periksa konfigurasi QRIS tanpa membuat transaksi sungguhan |
+| `preview_tampilan.js` | Pratinjau tampilan tanpa membuka aplikasi |
+
+## Pengujian
+
+Enam skrip manual, dijalankan satu per satu saat backend hidup. Bukan jest.
+
 ```bash
-npm start
+node test_sweep_reservasi.js    # stok dilepas setelah 5 menit
+node test_sweep_otomatis.js     # penyapu berjalan sendiri, bukan hanya endpoint
+node test_settle_stok.js        # potong dan lepas stok tidak pernah dobel
+node test_refund_flow.js        # pengajuan sampai keputusan admin
+node test_notifikasi.js         # inbox Firestore
+node test_push.js               # push FCM
 ```
 
-Kalau berhasil, akan tampil:
-```
-✅ Firebase Admin SDK initialized
-✅ Midtrans SANDBOX mode
-═══════════════════════════════════════════
-🎵 SoundWave Backend running on port 3000
-   http://localhost:3000
-═══════════════════════════════════════════
-```
+## Keamanan
 
----
+- `.env` dan `serviceAccountKey.json` masuk `.gitignore`. Jangan pernah di-commit.
+- Webhook Midtrans diverifikasi signature SHA512 sebelum status pesanan diubah.
+- Tiket ditandatangani Ed25519 dan diverifikasi di HP, tanpa bertanya ke server.
+- Kunci yang pernah bocor harus dirotasi di dashboard Midtrans. Menghapusnya dari berkas tidak menghapusnya dari riwayat git.
+- Rute `/admin/*` belum punya autentikasi. Jangan buka backend ini ke internet terbuka sebelum itu ditambahkan.
 
-## Endpoints
+## Batasan yang diketahui
 
-| Method | Path | Fungsi |
-|--------|------|--------|
-| GET | `/` | Health check |
-| POST | `/create-transaction` | Buat Snap Token Midtrans |
-| POST | `/midtrans-webhook` | Terima notifikasi pembayaran |
-| GET | `/check-status/:orderId` | Cek status order |
-| POST | `/settle-dev` | Simulasi bayar (sandbox) |
+- Firestore Spark membatasi 20.000 tulis dan 50.000 baca per hari.
+- Quick Tunnel berganti alamat setiap kali dijalankan ulang. Aplikasi membaca alamat terbaru dari `events/_backend_config`.
+- Satu instance, tanpa antrean. Cukup untuk demo, bukan untuk lonjakan penjualan.
+- Belum ada autentikasi di rute admin.
 
----
+## Lisensi
 
-## Yang Harus Diubah di Flutter
-
-File `lib/services/midtrans_service.dart` harus diubah:
-- Ganti `FirebaseFunctions.httpsCallable('createSnapToken')` → `http.post('http://<IP_LAPTOP>:3000/create-transaction')`
-- Ganti `FirebaseFunctions.httpsCallable('settleOrderDev')` → `http.post('http://<IP_LAPTOP>:3000/settle-dev')`
-
-> **IP Laptop**: jalankan `ipconfig` di CMD, cari IPv4 Address WiFi (contoh: `192.168.1.10`)
-> HP Android harus di WiFi yang sama dengan laptop.
-
----
-
-## Saat Demo Kampus
-
-1. Laptop nyalakan backend: `npm start`
-2. HP konek WiFi yang sama dengan laptop
-3. Flutter app panggil backend via IP laptop
-4. Midtrans Sandbox = tidak pakai uang sungguhan
-
----
-
-## ⚠️ PENTING
-
-- File `serviceAccountKey.json` dan `.env` **JANGAN** di-commit ke git
-- Server Key Midtrans **JANGAN** dimasukkan ke kode Flutter
-- Backend ini untuk **demo/development saja**, bukan production
+MIT. Lihat [LICENSE](LICENSE).
