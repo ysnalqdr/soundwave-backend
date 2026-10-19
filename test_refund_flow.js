@@ -97,7 +97,7 @@ async function getTicket() { return (await db.collection('tickets').doc(ticketId
 
     await seed();
 
-    // ── A. REJECT ────────────────────────────────────────────────
+    // A. Reject
     const r1 = await post('/admin/refund/reject', { refundId, alasanReject: 'uji tolak' });
     check('reject: HTTP 200 + success=true',
       r1.status === 200 && r1.json && r1.json.success === true, JSON.stringify(r1.json));
@@ -110,7 +110,7 @@ async function getTicket() { return (await db.collection('tickets').doc(ticketId
     check('reject: stok tiket TIDAK berubah',
       tk1.stok === 10 && tk1.terjual === 5, `stok=${tk1.stok} terjual=${tk1.terjual}`);
 
-    // ── B. APPROVE ───────────────────────────────────────────────
+    // B. Approve
     await db.collection('orders').doc(orderId).update({ status: 'REFUND_REQUESTED' });
     await db.collection('refunds').doc(refundId).update({ status: 'PENDING' });
     const r2 = await post('/admin/refund/approve', { refundId, orderId });
@@ -127,17 +127,17 @@ async function getTicket() { return (await db.collection('tickets').doc(ticketId
     check('approve: audit trail REFUND_APPROVED tercatat',
       Array.isArray(o2.auditTrail) && o2.auditTrail.some(a => a.event === 'REFUND_APPROVED'));
 
-    // ── C. APPROVE GANDA (guard) ─────────────────────────────────
+    // C. Approve ganda harus ditolak
     const r3 = await post('/admin/refund/approve', { refundId, orderId });
     check('approve ganda: ditolak HTTP 409', r3.status === 409, 'http=' + r3.status);
 
-    // ── D. ALIAS ROUTE ───────────────────────────────────────────
+    // D. Alias rute
     const r4 = await post('/approve-refund', { refundId, orderId });
     check('alias /approve-refund tidak 404', r4.status !== 404, 'http=' + r4.status);
     const r4b = await post('/reject-refund', { refundId, alasanReject: 'x' });
     check('alias /reject-refund tidak 404', r4b.status !== 404, 'http=' + r4b.status);
 
-    // ── E. TIKET SUDAH DISCAN → stok TIDAK dipulihkan ────────────
+    // E. Tiket sudah discan: stok tidak dipulihkan
     await db.collection('orders').doc(orderId).update({
       status: 'REFUND_REQUESTED',
       tanggalDigunakan: admin.firestore.FieldValue.serverTimestamp(),
@@ -149,7 +149,7 @@ async function getTicket() { return (await db.collection('tickets').doc(ticketId
       r5.json && r5.json.stokDipulihkan === false && tk3.stok === 12,
       `stok=${tk3.stok} json=${JSON.stringify(r5.json)}`);
 
-    // ── F. REJECT pada tiket sudah discan → kembali TERPAKAI ─────
+    // F. Reject pada tiket yang sudah discan: kembali TERPAKAI
     await db.collection('refunds').doc(refundId).update({ status: 'PENDING' });
     await post('/admin/refund/reject', { refundId, alasanReject: 'uji tolak 2' });
     const o4 = await getOrder();

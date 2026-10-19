@@ -5,9 +5,17 @@ const sa = require('./serviceAccountKey.json');
 admin.initializeApp({ credential: admin.credential.cert(sa) });
 const db = admin.firestore();
 const URL = 'http://localhost:3000/settle-dev';
+const { ambilToken, pesanLewati } = require('./token_uji');
 const lapor = (ok, p) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${p}`);
 
 (async () => {
+  // Rute /settle-dev dijaga token, dan hanya pemilik pesanan yang boleh.
+  const TOKEN = await ambilToken('zztest');
+  if (!TOKEN) {
+    pesanLewati('test_settle_stok.js');
+    process.exit(0);
+  }
+
   const tiketDoc = (await db.collection('tickets').limit(1).get()).docs[0];
   const tiketRef = tiketDoc.ref;
   const awal = tiketDoc.data();
@@ -17,13 +25,16 @@ const lapor = (ok, p) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${p}`);
   const settle = async (orderId) => {
     const r = await fetch(URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + TOKEN,
+      },
       body: JSON.stringify({ orderId }),
     });
     return { http: r.status, body: await r.json() };
   };
 
-  // ── Kasus 1: RESERVED (stok sudah dipotong saat reservasi) ──
+  // Kasus 1: RESERVED, stok sudah dipotong saat reservasi.
   const o1 = db.collection('orders').doc('ZZSETTLE_RESERVED');
   await o1.set({
     kodeBooking: 'ZZ-SET-1', idKonser: awal.idKonser || 'zz', idTiket: tiketRef.id,
@@ -40,7 +51,7 @@ const lapor = (ok, p) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${p}`);
   lapor(s1.stok === stok0, `stok TIDAK terpotong lagi (${stok0} → ${s1.stok}) ← bug lama: jadi ${stok0 - 2}`);
   lapor(s1.terjual === terjual0, `terjual tidak dobel (${terjual0} → ${s1.terjual})`);
 
-  // ── Kasus 2: PENDING lama (stok belum pernah dipotong) → potong sekali ──
+  // Kasus 2: PENDING lama, stok belum pernah dipotong, potong sekali.
   const o2 = db.collection('orders').doc('ZZSETTLE_LEGACY');
   await o2.set({
     kodeBooking: 'ZZ-SET-2', idKonser: awal.idKonser || 'zz', idTiket: tiketRef.id,
@@ -53,7 +64,7 @@ const lapor = (ok, p) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${p}`);
   lapor(s2.stok === stok0 - 1, `data lama dipotong SEKALI (${stok0} → ${s2.stok})`);
   lapor(s2.terjual === terjual0 + 1, `terjual +1 sekali (${terjual0} → ${s2.terjual})`);
 
-  // ── Kasus 3: EXPIRED → ditolak, stok tidak berubah ──
+  // Kasus 3: EXPIRED, ditolak dan stok tidak berubah.
   const o3 = db.collection('orders').doc('ZZSETTLE_EXPIRED');
   await o3.set({
     kodeBooking: 'ZZ-SET-3', idKonser: awal.idKonser || 'zz', idTiket: tiketRef.id,
@@ -68,7 +79,7 @@ const lapor = (ok, p) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${p}`);
     `pesan penolakan menyebut 5 menit → "${r3.body.message}"`);
   lapor(s3.stok === s2.stok, `stok tidak berubah oleh penolakan (${s3.stok})`);
 
-  // ── bersihkan ──
+  // Bersihkan data uji.
   await o1.delete(); await o2.delete(); await o3.delete();
   await tiketRef.update({ stok: stok0, terjual: terjual0, revisionCounter: awal.revisionCounter || 0 });
   const bersih = (await tiketRef.get()).data();

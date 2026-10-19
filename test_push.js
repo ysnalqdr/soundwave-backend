@@ -65,7 +65,7 @@ async function main() {
   console.log('  UJI PUSH FCM  ·  ' + TAG);
   console.log('  ' + '─'.repeat(56));
 
-  // ── 0. siapkan data uji ──
+  // 0. Siapkan data uji
   await db.collection(KOLEKSI_USER).doc(uidA).set({
     email: TAG + '_a@uji.local', nama: 'Uji Punya Token', role: 'user',
     fcmToken: tokenPalsu, fcmTokenUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -74,7 +74,7 @@ async function main() {
     email: TAG + '_b@uji.local', nama: 'Uji Tanpa Token', role: 'user',
   });
 
-  // ── 1. FCM menjawab? (token palsu -> harus error, bukan hang) ──
+  // 1. FCM harus menjawab error untuk token palsu, bukan menggantung.
   let kodeMentah = null, pesanMentah = '';
   try {
     await messaging.send({ token: tokenPalsu, notification: { title: 'uji', body: 'uji' } });
@@ -86,7 +86,7 @@ async function main() {
     'kode=' + kodeMentah);
   if (pesanMentah) console.log('       pesan: ' + String(pesanMentah).slice(0, 110));
 
-  // ── 2. user PUNYA token (mati) ──
+  // 2. User punya token mati.
   const simpanA = await pengirim.kirimNotifikasi(uidA, {
     title: 'Uji Push A', message: 'Isi uji A', type: 'info', refId: TAG, push: false,
   });
@@ -105,7 +105,7 @@ async function main() {
     console.log('[INFO] token tidak dihapus karena kode error bukan kode token-mati');
   }
 
-  // ── 3. user TANPA token ──
+  // 3. User tanpa token.
   const simpanB = await pengirim.kirimNotifikasi(uidB, {
     title: 'Uji Push B', message: 'Isi uji B', type: 'info', refId: TAG, push: false,
   });
@@ -116,7 +116,7 @@ async function main() {
   });
   check('push user tanpa token dilewati', statusB === 'tanpa_token', 'status=' + statusB);
 
-  // ── 4. isi dokumen inbox lengkap ──
+  // 4. Isi dokumen inbox lengkap.
   const notif = await db.collection(KOLEKSI_NOTIF).where('refId', '==', TAG).get();
   check('dua dokumen inbox tercipta', notif.size === 2, 'jumlah=' + notif.size);
   const n = notif.docs.length ? notif.docs[0].data() : {};
@@ -125,13 +125,13 @@ async function main() {
     n.title === 'Uji Push A' && n.type === 'info' && !!n.createdAt,
     'read=' + n.read + ' createdAt=' + (n.createdAt ? 'ada' : 'kosong'));
 
-  // ── 5. cleanup ──
+  // 5. Bersihkan data uji.
   const terhapus = await bersihkan();
   check('data uji dibersihkan', terhapus === 2, 'terhapus=' + terhapus);
   const sisaNotif = await db.collection(KOLEKSI_NOTIF).where('refId', '==', TAG).get();
   check('tidak ada sisa data uji', sisaNotif.size === 0, 'sisa=' + sisaNotif.size);
 
-  // ── rekap ──
+  // Rekap
   const lulus = hasil.filter(Boolean).length;
   console.log('');
   console.log('  ' + '─'.repeat(56));

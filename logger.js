@@ -13,7 +13,7 @@
  * Tanpa dependency eksternal — hanya ANSI escape bawaan.
  */
 
-// ─── deteksi warna ───
+// Deteksi warna
 const COLOR = (() => {
   if (process.env.NO_COLOR) return false;
   if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
@@ -30,12 +30,12 @@ const paint = {
   white: sgr('97'),
 };
 
-// ─── lebar kolom ───
+// Lebar kolom
 const W = { time: 8, method: 6, path: 30, status: 3, dur: 7, ref: 20 };
 const NOTE_MAX = 62;
 const VERBOSE = process.env.LOG_VERBOSE === '1';
 
-// ─── helper teks (selalu pad/cut teks MENTAH dulu, baru diwarnai) ───
+// Helper teks: pad atau potong teks mentah dulu, baru diwarnai.
 const pad = (s, n) => { s = String(s); return s.length >= n ? s : s + ' '.repeat(n - s.length); };
 const padL = (s, n) => { s = String(s); return s.length >= n ? s : ' '.repeat(n - s.length) + s; };
 const cut = (s, n) => {
@@ -58,13 +58,11 @@ const uptimeStr = () => {
 
 const out = (line) => process.stdout.write(line + '\n');
 
-// ─── statistik ───
+// Statistik
 const stats = { total: 0, errors: 0, warnings: 0, startedAt: Date.now() };
 const statsSnapshot = () => ({ ...stats, uptime: uptimeStr(), memMb: memMb() });
 
-// ═══════════════════════════════════════════
-// BANNER STARTUP
-// ═══════════════════════════════════════════
+// Banner startup
 function banner(info) {
   const inner = 60;
   out('╭' + '─'.repeat(inner) + '╮');
@@ -101,9 +99,7 @@ function ready(ms) {
   out(paint.dim(pad(clock(), W.time)) + '  ' + paint.green('▲') + '  siap dalam ' + Math.round(ms) + 'ms');
 }
 
-// ═══════════════════════════════════════════
-// BARIS REQUEST
-// ═══════════════════════════════════════════
+// Baris request
 function request({ method, path, status, ms, ref, note }) {
   const sc = status >= 500 ? paint.red : status >= 400 ? paint.yellow : paint.green;
   const line =
@@ -170,9 +166,7 @@ function requestLogger() {
   };
 }
 
-// ═══════════════════════════════════════════
-// BARIS EVENT (bukan request)
-// ═══════════════════════════════════════════
+// Baris event, bukan request
 const line = (symbol, text, color) =>
   out(paint.dim(pad(clock(), W.time)) + '  ' + color(symbol) + '  ' + text);
 
@@ -196,9 +190,7 @@ function note(res, text) {
   if (res && res.locals) res.locals.note = text;
 }
 
-// ═══════════════════════════════════════════
-// HEARTBEAT + SHUTDOWN
-// ═══════════════════════════════════════════
+// Heartbeat dan shutdown
 let hbTimer = null;
 function startHeartbeat(intervalMs = 60000) {
   if (hbTimer) clearInterval(hbTimer);

@@ -1,12 +1,8 @@
 /**
- * ═══════════════════════════════════════════════════════════════
  * SoundWave Backend Lokal — Midtrans + Firebase Admin
- * ═══════════════════════════════════════════════════════════════
- * Backend Node.js lokal untuk demo kampus. 100% gratis.
- * Menggantikan Firebase Cloud Functions (butuh Blaze plan).
  *
- * Jalankan: node server.js
- * ═══════════════════════════════════════════════════════════════
+ * Backend Node.js untuk demo kampus, gratis. Menggantikan Firebase Cloud
+ * Functions yang butuh Blaze plan. Jalankan: node server.js
  */
 
 const express = require('express');
@@ -16,11 +12,11 @@ const midtransClient = require('midtrans-client');
 const admin = require('firebase-admin');
 const log = require('./logger');
 const { buatPengirim } = require('./notifikasi');
-const { wajibAdmin } = require('./auth_admin');
+const { wajibAdmin, wajibPengguna } = require('./auth_admin');
+const { headerKeamanan, batasiLaju } = require('./keamanan_http');
 
-// ─── Load .env ───
 require('dotenv').config ? require('dotenv').config({ quiet: true }) : (() => {
-  // dotenv belum install? fallback: baca .env manual
+  // Kalau dotenv belum terpasang, .env dibaca manual.
   const fs = require('fs');
   const path = require('path');
   const envPath = path.join(__dirname, '.env');
@@ -34,7 +30,6 @@ require('dotenv').config ? require('dotenv').config({ quiet: true }) : (() => {
   }
 })();
 
-// ─── Firebase Admin Init ───
 let firebaseProjectId = process.env.FIREBASE_PROJECT_ID || '';
 try {
   let credential;
@@ -62,30 +57,24 @@ try {
 
 const db = admin.firestore();
 
-// ─── Pengirim notifikasi: inbox (koleksi `notifications`) + push FCM ───
-// Satu jalur untuk notifikasi OTOMATIS (file ini) dan PENGUMUMAN MANUAL
-// (pengumuman.js). Isi modulnya di notifikasi.js.
 const { kirimNotifikasi, kirimPush } = buatPengirim({
   db,
   messaging: admin.messaging(),
   log,
 });
 
-// ─── Midtrans Snap Client ───
 const isProduction = process.env.MIDTRANS_IS_PRODUCTION === 'true';
 const serverKey = process.env.MIDTRANS_SERVER_KEY || '';
 const clientKey = process.env.MIDTRANS_CLIENT_KEY || '';
 
-// ─── Jendela reservasi (menit) ───
-// Satu angka untuk app + backend. Stok dipotong SEKALI saat pembayaran
-// dimulai, dan dilepas SEKALI kalau tidak dibayar dalam jendela ini.
+// Satu angka untuk aplikasi dan backend. Stok dipotong sekali saat
+// pembayaran dimulai, dan dilepas sekali kalau tidak dibayar dalam jendela ini.
 const HOLD_MENIT = Number(process.env.RESERVATION_HOLD_MINUTES || 5);
 const HOLD_MS = HOLD_MENIT * 60 * 1000;
 
-// Apakah stok pesanan ini SUDAH dipotong? Dipakai semua jalur (checkout,
-// webhook, settle-dev, penyapu) supaya potong/lepas tidak pernah dobel.
-// Data lama tidak punya penanda: pesanan RESERVED versi lama PASTI sudah
-// dipotong (kode lama memotong di /checkout-atomic), pesanan PENDING belum.
+// Penanda stok sudah dipotong. Dipakai checkout, webhook, settle-dev, dan
+// penyapu supaya potong/lepas tidak pernah dobel. Pesanan lama tanpa penanda:
+// RESERVED pasti sudah dipotong, PENDING belum.
 function stokSudahDipotong(order) {
   if (!order) return false;
   if (order.stokDilepas === true) return false;
@@ -105,40 +94,28 @@ const snap = new midtransClient.Snap({
   clientKey,
 });
 
-// ─── Midtrans Core API (direct charge: VA, GoPay, QRIS, status polling) ───
 const core = new midtransClient.CoreApi({
   isProduction,
   serverKey,
   clientKey,
 });
 
-// ═══════════════════════════════════════════
-// Helper: NOTIFIKASI IN-APP (koleksi 'notifications')
-// ═══════════════════════════════════════════
-// Ditulis OTOMATIS oleh backend saat ada kejadian penting — admin maupun
-// user TIDAK perlu mengetik apa pun. Dibaca user di layar Jelajah (ikon
-// lonceng). Kegagalan di sini NON-FATAL: tidak boleh menggagalkan
-// transaksi utama (pembayaran / refund).
+// Ditulis backend saat ada kejadian penting, dibaca user di ikon lonceng.
+// Gagal kirim tidak boleh menggagalkan transaksi utama, jadi non-fatal.
 
 /** Format angka jadi rupiah, mis. 155000 -> "Rp 155.000". */
 function rupiah(n) {
   return 'Rp ' + (Math.round(Number(n)) || 0).toLocaleString('id-ID');
 }
 
-// CATATAN: fungsi kirimNotifikasi() dulu ada di sini. Sekarang dipindah ke
-// notifikasi.js supaya dipakai BERSAMA oleh notifikasi otomatis (file ini)
-// dan pengumuman manual (pengumuman.js). Yang di-import di atas sudah
-// mencakup: kirimNotifikasi() -> inbox + push, dan kirimPush() -> push saja.
+// Notifikasi otomatis dan pengumuman manual memakai modul yang sama,
+// yaitu notifikasi.js.
 
-// mode Midtrans ditampilkan di banner startup
-
-// ─── Helper: render a fallback QR image URL via QuickChart ───
 function buildQrImageUrl(qrString) {
   if (!qrString) return null;
   return `https://quickchart.io/qr?text=${encodeURIComponent(qrString)}&size=300&dark=000000&light=FFFFFF&margin=2`;
 }
 
-// ─── Helper: resolve Firestore order doc + gross amount ───
 async function loadOrderForCharge(orderId) {
   const orderRef = db.collection('orders').doc(orderId);
   const orderDoc = await orderRef.get();
@@ -157,17 +134,15 @@ async function loadOrderForCharge(orderId) {
   return { orderRef, orderData, grossAmount };
 }
 
-// ─── Helper: order_id unik untuk Midtrans ───
-// Midtrans menolak order_id yang sudah pernah di-charge (406 conflict) atau
-// duplikat dalam waktu singkat. Pakai basis kodeBooking + suffix unik, lalu
-// simpan pemetaannya di dokumen order agar webhook & poll bisa menemukannya.
+// Midtrans menolak order_id yang sudah pernah di-charge (406) atau duplikat
+// dalam waktu singkat. Pakai kodeBooking + suffix unik, lalu simpan
+// pemetaannya di dokumen order supaya webhook dan poll bisa menemukannya.
 function uniqueMidtransOrderId(base) {
   const clean = (base || 'SW').toString().replace(/[^A-Za-z0-9\-_.]/g, '').slice(0, 30);
   const suffix = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   return `${clean}-${suffix}`.slice(0, 50);
 }
 
-// Cek apakah timestamp Firestore/Date masih di masa depan (instrumen berlaku).
 function isFutureTimestamp(value) {
   try {
     if (!value) return false;
@@ -180,7 +155,6 @@ function isFutureTimestamp(value) {
   }
 }
 
-// ─── Helper: GET a Midtrans action URL (e.g. GoPay generate-qr-code) ───
 async function fetchActionUrl(url) {
   try {
     const resp = await fetch(url, {
@@ -200,30 +174,39 @@ async function fetchActionUrl(url) {
   }
 }
 
-// ─── Ed25519 Key untuk QR Signature ───
 const activeKeyId = process.env.ED25519_KEY_ID || 'v1';
 
 function getSigningKey() {
   const hex = process.env.ED25519_PRIVATE_KEY_HEX;
   if (!hex) {
-    // Development sandbox key (safe for demo, jangan pakai di production)
-    return Buffer.from(
-      '302e020100300506032b657004220420c699893e2338a0bd8c4aef14d17c700209775bd14198d80dad1ce1c896f9eb31',
-      'hex'
+    throw new Error(
+      'ED25519_PRIVATE_KEY_HEX belum diisi. Jalankan "node buat_kunci_qr.js", ' +
+        'lalu salin hasilnya ke .env. Kunci privat tidak boleh ada di dalam repo.',
     );
   }
   return Buffer.from(hex, 'hex');
 }
 
-// ─── Express App ───
 const app = express();
+
+// Di belakang tunnel Cloudflare, alamat asli ada di X-Forwarded-For.
+// Tanpa ini semua permintaan terlihat datang dari 127.0.0.1 dan pembatas
+// laju akan menghukum semua pengguna sekaligus.
+app.set('trust proxy', true);
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
+app.use(headerKeamanan);
 app.use(log.requestLogger());
 
-// ═══════════════════════════════════════════
-// HEALTH CHECK
-// ═══════════════════════════════════════════
+// Pembatas laju per kelompok rute.
+app.use('/admin', batasiLaju({ maks: 60, nama: 'rute admin' }));
+app.use('/midtrans-webhook', batasiLaju({ maks: 120, nama: 'webhook' }));
+app.use(
+  ['/checkout-atomic', '/create-transaction', '/create-qris', '/create-va', '/create-gopay'],
+  batasiLaju({ maks: 30, nama: 'pembuatan transaksi' }),
+);
+
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -233,19 +216,16 @@ app.get('/', (req, res) => {
   });
 });
 
-// ═══════════════════════════════════════════
-// 1. POST /create-transaction
-// Flutter panggil ini untuk buat Snap Token
-// ═══════════════════════════════════════════
-app.post('/create-transaction', async (req, res) => {
+app.post('/create-transaction', wajibPengguna, async (req, res) => {
   try {
-    const { orderId, userId } = req.body;
+    const { orderId } = req.body;
+    // Identitas diambil dari token, bukan dari body permintaan.
+    const userId = req.pengguna.uid;
 
     if (!orderId) {
       return res.status(400).json({ success: false, message: 'orderId wajib disertakan' });
     }
 
-    // Ambil data order dari Firestore
     const orderRef = db.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
 
@@ -255,12 +235,10 @@ app.post('/create-transaction', async (req, res) => {
 
     const orderData = orderDoc.data();
 
-    // Validasi: hanya pemilik order
     if (userId && orderData.userId !== userId) {
       return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // Hanya PENDING order bisa diproses
     if (orderData.status !== 'PENDING') {
       return res.status(400).json({
         success: false,
@@ -268,7 +246,6 @@ app.post('/create-transaction', async (req, res) => {
       });
     }
 
-    // ── Re-verifikasi harga dari database (anti price tampering) ──
     let authoritativePrice = 0;
     if (orderData.idTiket) {
       const ticketDoc = await db.collection('tickets').doc(orderData.idTiket).get();
@@ -290,7 +267,7 @@ app.post('/create-transaction', async (req, res) => {
       ? (authoritativePrice * orderData.jumlahTiket) + serviceFee
       : Math.round(orderData.totalHarga);
 
-    // Security: overwrite jika harga client tidak cocok
+    // Harga dari klien ditimpa harga database.
     if (Math.round(orderData.totalHarga) !== authoritativeTotal) {
       log.warn(`[SECURITY] Price mismatch order ${orderId}. Expected ${authoritativeTotal}, got ${orderData.totalHarga}`);
       await orderRef.update({
@@ -299,7 +276,6 @@ app.post('/create-transaction', async (req, res) => {
       });
     }
 
-    // Kalau sudah punya snapToken, reuse
     if (orderData.snapToken && orderData.snapRedirectUrl) {
       return res.json({
         success: true,
@@ -309,7 +285,6 @@ app.post('/create-transaction', async (req, res) => {
       });
     }
 
-    // ── Buat transaksi Midtrans ──
     const parameter = {
       transaction_details: {
         order_id: orderData.kodeBooking || orderId,
@@ -340,7 +315,6 @@ app.post('/create-transaction', async (req, res) => {
 
     const transaction = await snap.createTransaction(parameter);
 
-    // Simpan snapToken ke Firestore
     await orderRef.update({
       snapToken: transaction.token,
       snapRedirectUrl: transaction.redirect_url,
@@ -361,12 +335,7 @@ app.post('/create-transaction', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 1b. POST /checkout-atomic
-// Atomic: reserve tiket + create Snap token dalam 1 transaction
-// Cegah race condition pada tiket viral
-// ═══════════════════════════════════════════
-app.post('/checkout-atomic', async (req, res) => {
+app.post('/checkout-atomic', wajibPengguna, async (req, res) => {
   try {
     const { orderId, ticketId, jumlahTiket, revisionCounter } = req.body;
 
@@ -382,7 +351,6 @@ app.post('/checkout-atomic', async (req, res) => {
     let finalRevision = null;
     let conflictDetected = false;
 
-    // Atomic transaction: reserve + token
     await db.runTransaction(async (transaction) => {
       const orderDoc = await transaction.get(orderRef);
       const ticketDoc = await transaction.get(ticketRef);
@@ -397,10 +365,8 @@ app.post('/checkout-atomic', async (req, res) => {
       const orderData = orderDoc.data();
       const ticketData = ticketDoc.data();
 
-      // ── Status order menentukan apakah stok perlu dipotong ──
-      //   PENDING            → stok BELUM dipotong → potong sekarang (sekali).
-      //   RESERVED + potong  → stok SUDAH dipotong → JANGAN potong lagi,
-      //                        cukup segarkan jendela waktu pembayaran.
+      // PENDING: stok belum dipotong, potong sekarang. RESERVED yang sudah
+      // dipotong cukup disegarkan jendela bayarnya.
       const statusAwal = orderData.status;
       const sudahPotong = stokSudahDipotong(orderData);
 
@@ -415,9 +381,8 @@ app.post('/checkout-atomic', async (req, res) => {
 
       const currentRevision = ticketData.revisionCounter || 0;
 
-      // Optimistic locking: hanya relevan saat kita AKAN memotong stok.
-      // Untuk pesanan yang sudah direservasi, revision sudah naik karena
-      // potongan kita sendiri — mengeceknya justru memicu konflik palsu.
+      // Optimistic lock hanya relevan saat stok akan dipotong. Untuk pesanan yang
+      // sudah direservasi, revision sudah naik karena potongan kita sendiri.
       if (!sudahPotong && revisionCounter !== undefined && revisionCounter !== currentRevision) {
         conflictDetected = true;
         return;
@@ -445,17 +410,14 @@ app.post('/checkout-atomic', async (req, res) => {
         finalRevision = currentRevision;
       }
 
-      // Generate QR signature
       const privKey = crypto.createPrivateKey({ key: getSigningKey(), format: 'der', type: 'pkcs8' });
       const canonicalPayload = `SW2|${activeKeyId}|${orderRef.id}|${orderData.kodeBooking}|${orderData.idKonser}|${orderData.kategoriTiket}|${jumlahTiket}`;
       const edSignatureHex = crypto.sign(null, Buffer.from(canonicalPayload), privKey).toString('hex');
       const signedQrPayload = `${canonicalPayload}|${edSignatureHex}`;
 
-      // GROSS AMOUNT: pakai total pesanan yang tersimpan (order.totalHarga) —
-      // sumber yang sama dengan /create-va, /create-gopay, /create-qris
-      // (loadOrderForCharge) dan angka yang tampil di halaman tiket.
-      // Menghitung ulang dari harga tiket akan menagih harga PENUH pada
-      // pesanan yang totalnya sudah terpotong voucher/promo.
+      // Gross amount memakai order.totalHarga, sumber yang sama dengan rute VA,
+      // GoPay, dan QRIS. Menghitung ulang dari harga tiket akan menagih harga
+      // penuh pada pesanan yang sudah terpotong voucher.
       const grossAmount = Math.round(Number(orderData.totalHarga))
         || ((Number(ticketData.harga) || 0) * jumlahTiket) + 5000;
       const biayaAdmin = 5000;
@@ -464,7 +426,7 @@ app.post('/checkout-atomic', async (req, res) => {
       const hargaSatuan = sisaTiket > 0 ? Math.round(sisaTiket / qty) : 0;
       const namaItem =
         `${orderData.judulKonser} (${orderData.kategoriTiket})`.substring(0, 50);
-      // item_details WAJIB berjumlah tepat = gross_amount (validasi Snap).
+      // item_details harus berjumlah tepat sama dengan gross_amount (validasi Snap).
       const itemDetails = (sisaTiket > 0 && hargaSatuan * qty === sisaTiket)
         ? [
             { id: ticketId, price: hargaSatuan, quantity: qty, name: namaItem },
@@ -477,7 +439,6 @@ app.post('/checkout-atomic', async (req, res) => {
           ]
         : [{ id: ticketId, price: grossAmount, quantity: 1, name: namaItem }];
 
-      // Update order: mark as reserved + generate Snap token
       const parameter = {
         transaction_details: {
           order_id: orderData.kodeBooking || orderId,
@@ -491,10 +452,9 @@ app.post('/checkout-atomic', async (req, res) => {
         },
       };
 
-      // Snap token creation: best-effort. Jika order sudah memiliki transaksi
-      // (VA/QR dibuat via Core API /create-va, /create-gopay, /create-qris di Step 2),
-      // snap.createTransaction akan gagal "order_id already exists". Dalam kasus itu
-      // kita reuse token lama dan TETAP menyelesaikan reservasi stok (inventory guarantee).
+      // Kalau order sudah punya transaksi VA atau QR, snap.createTransaction gagal
+      // dengan "order_id already exists". Token lama dipakai ulang dan reservasi
+      // stok tetap diselesaikan.
       try {
         const mtxResult = await snap.createTransaction(parameter);
         snapToken = mtxResult.token;
@@ -505,16 +465,14 @@ app.post('/checkout-atomic', async (req, res) => {
         redirectUrl = orderData.snapRedirectUrl || redirectUrl;
       }
 
-      // Metode pembayaran yang benar-benar dipakai user (opsional, dari app).
       const metodeBayar = req.body && req.body.metodePembayaran
         ? String(req.body.metodePembayaran).substring(0, 60)
         : null;
       transaction.update(orderRef, {
         status: 'RESERVED',
-        // Pembukuan stok: dipotong tepat sekali, dilepas tepat sekali.
+        // Stok dipotong tepat sekali, jendela bayar dihitung dari jam server.
         stokDipotong: true,
         stokDilepas: false,
-        // Jendela pembayaran disegarkan dari jam SERVER (bukan jam HP user).
         reservedUntil: admin.firestore.Timestamp.fromMillis(Date.now() + HOLD_MS),
         holdMenit: HOLD_MENIT,
         ...(metodeBayar ? { metodePembayaran: metodeBayar } : {}),
@@ -554,12 +512,7 @@ app.post('/checkout-atomic', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 1c. POST /create-va
-// Buat Virtual Account untuk Transfer Bank (BCA / BNI / Mandiri)
-// Menggunakan Midtrans Core API /v2/charge dengan payment_type bank_transfer
-// ═══════════════════════════════════════════
-app.post('/create-va', async (req, res) => {
+app.post('/create-va', wajibPengguna, async (req, res) => {
   try {
     const { orderId, bank } = req.body;
     const validBanks = ['bca', 'bni', 'mandiri'];
@@ -574,7 +527,7 @@ app.post('/create-va', async (req, res) => {
 
     const { orderRef, orderData, grossAmount } = await loadOrderForCharge(orderId);
 
-    // Idempotency: jika VA masih berlaku, kembalikan yang sama (cegah 406 conflict)
+    // Idempotency: VA yang masih berlaku dikembalikan apa adanya, bukan dibuat baru.
     if (orderData.vaNumber && isFutureTimestamp(orderData.vaExpiresAt)) {
       return res.json({
         success: true,
@@ -592,7 +545,6 @@ app.post('/create-va', async (req, res) => {
 
     const midtransOrderId = uniqueMidtransOrderId(orderData.kodeBooking || orderId);
 
-    // Charge via Core API — bank transfer
     const parameter = {
       payment_type: 'bank_transfer',
       transaction_details: {
@@ -687,12 +639,7 @@ app.post('/create-va', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 1d. POST /create-gopay
-// Buat transaksi GoPay + QR code (berlaku 5 menit)
-// Menggunakan Midtrans Core API /v2/charge dengan payment_type gopay
-// ═══════════════════════════════════════════
-app.post('/create-gopay', async (req, res) => {
+app.post('/create-gopay', wajibPengguna, async (req, res) => {
   try {
     const { orderId } = req.body;
     if (!orderId) {
@@ -701,7 +648,7 @@ app.post('/create-gopay', async (req, res) => {
 
     const { orderRef, orderData, grossAmount } = await loadOrderForCharge(orderId);
 
-    // Idempotency: jika QR GoPay masih berlaku, kembalikan yang sama
+    // Idempotency: QR GoPay yang masih berlaku dikembalikan apa adanya.
     if (orderData.gopayQrString && isFutureTimestamp(orderData.gopayExpiresAt)) {
       return res.json({
         success: true,
@@ -737,7 +684,8 @@ app.post('/create-gopay', async (req, res) => {
 
     const chargeResponse = await core.charge(parameter);
 
-    // GoPay charge → actions[] (generate-qr-code). Beberapa versi langsung qr_string.
+    // GoPay mengembalikan actions[] berisi generate-qr-code. Sebagian versi
+    // langsung mengirim qr_string.
     let qrString = chargeResponse.qr_string || chargeResponse.qrcode_string || null;
     let qrImageUrl = chargeResponse.qr_code_url || null;
 
@@ -800,12 +748,7 @@ app.post('/create-gopay', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 1e. POST /create-qris
-// Buat transaksi QRIS + QR code (berlaku 5 menit)
-// Menggunakan Midtrans Core API /v2/charge dengan payment_type qris
-// ═══════════════════════════════════════════
-app.post('/create-qris', async (req, res) => {
+app.post('/create-qris', wajibPengguna, async (req, res) => {
   try {
     const { orderId } = req.body;
     if (!orderId) {
@@ -814,7 +757,7 @@ app.post('/create-qris', async (req, res) => {
 
     const { orderRef, orderData, grossAmount } = await loadOrderForCharge(orderId);
 
-    // Idempotency: jika QR QRIS masih berlaku, kembalikan yang sama
+    // Idempotency: QR QRIS yang masih berlaku dikembalikan apa adanya.
     if (orderData.qrisQrString && isFutureTimestamp(orderData.qrisExpiresAt)) {
       return res.json({
         success: true,
@@ -841,15 +784,14 @@ app.post('/create-qris', async (req, res) => {
         email: orderData.emailPembeli || 'guest@soundwave.id',
         phone: orderData.teleponPembeli || '08123456789',
       },
-      // PENTING: JANGAN set `qris.acquirer` = 'gpn'. Midtrans SANDBOX menolaknya
-      // dengan HTTP 500 "Sorry. Our system is recovering from unexpected issues."
-      // (terbukti lewat uji langsung). Biarkan default (gopay) — terverifikasi sukses.
+      // Jangan set qris.acquirer = 'gpn'. Sandbox Midtrans menolaknya dengan
+      // HTTP 500 "Our system is recovering". Biarkan default, sudah terbukti jalan.
       expiry: { unit: 'minute', duration: 5 }, // QRIS QR berlaku 5 menit
     };
 
     const chargeResponse = await core.charge(parameter);
 
-    // QRIS charge langsung mengembalikan qr_string
+    // QRIS mengembalikan qr_string langsung, tanpa actions[].
     let qrString = chargeResponse.qr_string || chargeResponse.qrcode_string || null;
     let qrImageUrl = chargeResponse.qr_code_url || null;
 
@@ -908,19 +850,14 @@ app.post('/create-qris', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 1f. POST /poll-payment
-// Cek status pembayaran Midtrans via Core API /v2/{orderId}/status
-// Dipanggil Flutter secara periodik setelah QR/VA ditampilkan
-// ═══════════════════════════════════════════
-app.post('/poll-payment', async (req, res) => {
+app.post('/poll-payment', wajibPengguna, async (req, res) => {
   try {
     const { orderId } = req.body;
     if (!orderId) {
       return res.status(400).json({ success: false, message: 'orderId wajib disertakan' });
     }
 
-    // Ambil order untuk dapat kodeBooking (Midtrans pakai kodeBooking sebagai order_id)
+    // Midtrans memakai kodeBooking sebagai order_id, jadi order dibaca dulu.
     const orderRef = db.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
     if (!orderDoc.exists) {
@@ -929,13 +866,11 @@ app.post('/poll-payment', async (req, res) => {
     const orderData = orderDoc.data();
     const midtransOrderId = orderData.midtransOrderId || orderData.kodeBooking || orderId;
 
-    // Core API: /v2/{orderId}/status
     const statusResponse = await core.transaction.status(midtransOrderId);
 
     const txStatus = statusResponse.transaction_status || 'pending';
     const fraudStatus = statusResponse.fraud_status;
 
-    // Map status Midtrans → status SoundWave
     let mappedStatus = 'PENDING';
     let isPaid = false;
     if (txStatus === 'capture' && fraudStatus === 'accept') {
@@ -946,7 +881,6 @@ app.post('/poll-payment', async (req, res) => {
       mappedStatus = 'CANCELLED';
     }
 
-    // Jika lunas dan order belum AKTIF, update Firestore
     if (isPaid && orderData.status !== 'AKTIF' && orderData.status !== 'TERPAKAI') {
       try {
         await db.runTransaction(async (transaction) => {
@@ -955,7 +889,6 @@ app.post('/poll-payment', async (req, res) => {
           const freshData = freshDoc.data();
           if (freshData.status === 'AKTIF' || freshData.status === 'TERPAKAI') return;
 
-          // Generate Ed25519 signed QR payload (reuse existing signing)
           const privKey = crypto.createPrivateKey({ key: getSigningKey(), format: 'der', type: 'pkcs8' });
           const canonicalPayload = `SW2|${activeKeyId}|${orderRef.id}|${freshData.kodeBooking}|${freshData.idKonser}|${freshData.kategoriTiket}|${freshData.jumlahTiket}`;
           const edSignatureHex = crypto.sign(null, Buffer.from(canonicalPayload), privKey).toString('hex');
@@ -1002,10 +935,6 @@ app.post('/poll-payment', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 2. POST /midtrans-webhook
-// Midtrans kirim notifikasi pembayaran ke sini
-// ═══════════════════════════════════════════
 app.post('/midtrans-webhook', async (req, res) => {
   try {
     const notification = req.body;
@@ -1019,16 +948,26 @@ app.post('/midtrans-webhook', async (req, res) => {
       payment_type: paymentType,
     } = notification;
 
-    // 1. Verifikasi signature SHA512
+    // Tanda tangan SHA512 dari Midtrans.
     const rawSignature = `${orderIdOrBookingCode}${statusCode}${grossAmount}${serverKey}`;
     const calculatedSignature = crypto.createHash('sha512').update(rawSignature).digest('hex');
 
-    if (signatureKey !== calculatedSignature) {
+    // Dibandingkan dengan timingSafeEqual supaya tidak bisa ditebak lewat
+    // selisih waktu respons.
+    const tandaTanganCocok =
+      typeof signatureKey === 'string' &&
+      signatureKey.length === calculatedSignature.length &&
+      crypto.timingSafeEqual(
+        Buffer.from(signatureKey, 'utf8'),
+        Buffer.from(calculatedSignature, 'utf8'),
+      );
+
+    if (!tandaTanganCocok) {
       log.warn(`[SECURITY] Invalid webhook signature for ${orderIdOrBookingCode}`);
       return res.status(403).json({ error: 'Invalid signature key' });
     }
 
-    // 2. Cari order di Firestore (by ID atau kodeBooking)
+    // Order dicari lewat ID, lalu kodeBooking, lalu midtransOrderId.
     let orderRef = db.collection('orders').doc(orderIdOrBookingCode);
     let orderDoc = await orderRef.get();
 
@@ -1037,7 +976,7 @@ app.post('/midtrans-webhook', async (req, res) => {
         .where('kodeBooking', '==', orderIdOrBookingCode)
         .limit(1).get();
       if (query.empty) {
-        // Fallback: cari berdasarkan midtransOrderId (order_id unik per charge)
+        // midtransOrderId dipakai karena order_id unik per charge.
         query = await db.collection('orders')
           .where('midtransOrderId', '==', orderIdOrBookingCode)
           .limit(1).get();
@@ -1051,7 +990,6 @@ app.post('/midtrans-webhook', async (req, res) => {
 
     const currentOrder = orderDoc.data();
 
-    // 3. Map status Midtrans → SoundWave
     let targetStatus = 'PENDING';
     let isPaidSuccess = false;
 
@@ -1063,16 +1001,14 @@ app.post('/midtrans-webhook', async (req, res) => {
       targetStatus = 'CANCELLED';
     }
 
-    // 4. Idempotency check (RESERVED → AKTIF OK, jangan reject)
+    // Idempotency: RESERVED ke AKTIF sah, jangan ditolak.
     if (currentOrder.status === 'AKTIF' || currentOrder.status === 'TERPAKAI') {
       return res.json({ status: 'already_processed' });
     }
 
-    // 5. Atomic transaction: update status + inventory
     let finalStatus = targetStatus;
-    // Di-set HANYA bila transaksi ini yang benar-benar mengubah status.
-    // (Jalur 'sudah AKTIF' di bawah tidak meng-set-nya, sehingga webhook
-    //  yang datang berulang tidak mengirim notifikasi dobel.)
+    // Penanda notifikasi hanya di-set kalau transaksi ini benar-benar
+    // mengubah status, supaya webhook berulang tidak mengirim notifikasi dobel.
     let notifUntukDikirim = null;
 
     await db.runTransaction(async (transaction) => {
@@ -1092,9 +1028,8 @@ app.post('/midtrans-webhook', async (req, res) => {
       let potongSekarang = false;
       let lepasSekarang = false;
 
-      // ── PEMBUKUAN STOK — satu aturan, tidak pernah dobel ──
-      // Stok dipotong SEKALI saat reservasi (/checkout-atomic), dilepas SEKALI
-      // saat gagal/kedaluwarsa, dan TIDAK dipotong lagi saat pembayaran masuk.
+      // Stok dipotong sekali saat reservasi, dilepas sekali saat gagal atau
+      // kedaluwarsa, tidak dipotong lagi saat pembayaran masuk.
       if (isPaidSuccess) {
         if (freshData.status === 'EXPIRED' || freshData.status === 'CANCELLED') {
           // Uang masuk tapi stok sudah dilepas → tiket tidak bisa diberikan.
@@ -1124,8 +1059,8 @@ app.post('/midtrans-webhook', async (req, res) => {
           }
         }
       } else if (['cancel', 'deny', 'expire'].includes(transactionStatus)) {
-        // Gagal bayar / kedaluwarsa di Midtrans → status EXPIRED (bukan
-        // CANCELLED) dan stok dilepas SEKALI kalau memang pernah dipotong.
+        // Gagal bayar atau kedaluwarsa jadi EXPIRED, bukan CANCELLED, dan stok
+        // dilepas sekali kalau memang pernah dipotong.
         finalStatus = 'EXPIRED';
         lepasSekarang = !!sudahPotong && !!freshData.idTiket;
 
@@ -1144,7 +1079,6 @@ app.post('/midtrans-webhook', async (req, res) => {
         }
       }
 
-      // Generate Ed25519 signed QR payload
       const privKey = crypto.createPrivateKey({ key: getSigningKey(), format: 'der', type: 'pkcs8' });
       const canonicalPayload = `SW2|${activeKeyId}|${orderRef.id}|${freshData.kodeBooking}|${freshData.idKonser}|${freshData.kategoriTiket}|${freshData.jumlahTiket}`;
       const edSignatureHex = crypto.sign(null, Buffer.from(canonicalPayload), privKey).toString('hex');
@@ -1172,7 +1106,7 @@ app.post('/midtrans-webhook', async (req, res) => {
       notifUntukDikirim = finalStatus;
     });
 
-    // 6. Notifikasi in-app (non-fatal)
+    // Notifikasi in-app, non-fatal.
     if (notifUntukDikirim === 'AKTIF') {
       await kirimNotifikasi(currentOrder.userId, {
         title: 'Pembayaran Berhasil',
@@ -1217,11 +1151,7 @@ app.post('/midtrans-webhook', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 3. GET /check-status/:orderId
-// Flutter cek status order setelah bayar
-// ═══════════════════════════════════════════
-app.get('/check-status/:orderId', async (req, res) => {
+app.get('/check-status/:orderId', wajibPengguna, async (req, res) => {
   try {
     const { orderId } = req.params;
     const orderDoc = await db.collection('orders').doc(orderId).get();
@@ -1231,6 +1161,10 @@ app.get('/check-status/:orderId', async (req, res) => {
     }
 
     const data = orderDoc.data();
+    if (data.userId !== req.pengguna.uid) {
+      return res.status(403).json({ success: false, message: 'Pesanan ini bukan milik akun Anda' });
+    }
+
     res.json({
       success: true,
       order_id: orderId,
@@ -1244,11 +1178,7 @@ app.get('/check-status/:orderId', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 4. POST /settle-dev
-// Simulasi pembayaran untuk demo (sandbox only)
-// ═══════════════════════════════════════════
-app.post('/settle-dev', async (req, res) => {
+app.post('/settle-dev', wajibPengguna, async (req, res) => {
   if (isProduction) {
     return res.status(403).json({ success: false, message: 'Dinonaktifkan di production' });
   }
@@ -1266,6 +1196,9 @@ app.post('/settle-dev', async (req, res) => {
       if (!orderDoc.exists) throw new Error('Pesanan tidak ditemukan');
 
       const orderData = orderDoc.data();
+      if (orderData.userId !== req.pengguna.uid) {
+        throw new Error('Pesanan ini bukan milik akun Anda');
+      }
       if (orderData.status === 'AKTIF' || orderData.status === 'TERPAKAI') return;
       if (orderData.status === 'EXPIRED') {
         throw new Error(
@@ -1273,9 +1206,7 @@ app.post('/settle-dev', async (req, res) => {
         );
       }
 
-      // ── Stok: potong HANYA kalau belum pernah dipotong saat reservasi. ──
-      // Dulu blok ini memotong tanpa syarat, sehingga 1 tiket memotong stok
-      // DUA kali (sekali di /checkout-atomic, sekali di sini).
+      // Dulu blok ini memotong tanpa syarat, jadi satu tiket memotong stok dua kali.
       if (orderData.idTiket && !stokSudahDipotong(orderData)) {
         const ticketRef = db.collection('tickets').doc(orderData.idTiket);
         const ticketDoc = await transaction.get(ticketRef);
@@ -1288,7 +1219,6 @@ app.post('/settle-dev', async (req, res) => {
         }
       }
 
-      // Generate QR signature
       const privKey = crypto.createPrivateKey({ key: getSigningKey(), format: 'der', type: 'pkcs8' });
       const canonicalPayload = `SW2|${activeKeyId}|${orderRef.id}|${orderData.kodeBooking}|${orderData.idKonser}|${orderData.kategoriTiket}|${orderData.jumlahTiket}`;
       const edSignatureHex = crypto.sign(null, Buffer.from(canonicalPayload), privKey).toString('hex');
@@ -1314,11 +1244,7 @@ app.post('/settle-dev', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 5. POST /sync-offline-scans
-// Gate scanner sinkronisasi tiket offline
-// ═══════════════════════════════════════════
-app.post('/sync-offline-scans', async (req, res) => {
+app.post('/sync-offline-scans', wajibPengguna, async (req, res) => {
   try {
     const { scans } = req.body;
     if (!Array.isArray(scans) || scans.length === 0) {
@@ -1358,13 +1284,7 @@ app.post('/sync-offline-scans', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 6. PROMO CODES
-// ═══════════════════════════════════════════
-
-// 6a. POST /validate-promo
-// Validasi kode promo saat checkout
-app.post('/validate-promo', async (req, res) => {
+app.post('/validate-promo', wajibPengguna, async (req, res) => {
   try {
     const { kode, idKonser, subtotal } = req.body;
     if (!kode || !idKonser || subtotal === undefined) {
@@ -1381,12 +1301,10 @@ app.post('/validate-promo', async (req, res) => {
 
     const promo = promoDoc.data();
 
-    // Cek aktif
     if (promo.aktif === false) {
       return res.json({ valid: false, message: 'Kode promo sudah tidak aktif' });
     }
 
-    // Cek periode berlaku (berlakuMulai/berlakuAkhir disimpan sebagai ISO string)
     const nowMs = Date.now();
     const mulaiMs = promo.berlakuMulai ? new Date(promo.berlakuMulai).getTime() : 0;
     const akhirMs = promo.berlakuAkhir ? new Date(promo.berlakuAkhir).getTime() : Infinity;
@@ -1394,19 +1312,16 @@ app.post('/validate-promo', async (req, res) => {
       return res.json({ valid: false, message: 'Kode promo di luar periode berlaku' });
     }
 
-    // Cek konser (kosong = berlaku untuk semua konser)
     if (promo.idKonser && promo.idKonser !== idKonser) {
       return res.json({ valid: false, message: 'Kode promo tidak berlaku untuk konser ini' });
     }
 
-    // Cek kuota pemakaian
     const sudahDipakai = Number(promo.sudahDipakai) || 0;
     const maxPakai = Number(promo.maxPakai) || 0;
     if (maxPakai > 0 && sudahDipakai >= maxPakai) {
       return res.json({ valid: false, message: 'Kuota kode promo sudah habis' });
     }
 
-    // Cek minimal pembelian
     const minPembelian = Number(promo.minPembelian) || 0;
     if (minPembelian > 0 && subtotalNum < minPembelian) {
       return res.json({
@@ -1415,7 +1330,6 @@ app.post('/validate-promo', async (req, res) => {
       });
     }
 
-    // Hitung diskon
     const nilai = Number(promo.nilai) || 0;
     const tipe = promo.tipe; // 'persen' | 'nominal'
     let discountAmount = 0;
@@ -1439,8 +1353,6 @@ app.post('/validate-promo', async (req, res) => {
   }
 });
 
-// 6b. POST /admin/promo
-// Buat kode promo baru
 app.post('/admin/promo', wajibAdmin, async (req, res) => {
   try {
     const { kode, tipe, nilai, idKonser, minPembelian, maxPakai, berlakuMulai, berlakuAkhir, deskripsi } = req.body;
@@ -1483,8 +1395,6 @@ app.post('/admin/promo', wajibAdmin, async (req, res) => {
   }
 });
 
-// 6c. GET /admin/promos
-// List semua kode promo
 app.get('/admin/promos', wajibAdmin, async (req, res) => {
   try {
     const snapshot = await db.collection('promo_codes').get();
@@ -1496,8 +1406,6 @@ app.get('/admin/promos', wajibAdmin, async (req, res) => {
   }
 });
 
-// 6d. DELETE /admin/promo/:id
-// Nonaktifkan kode promo (aktif=false)
 app.delete('/admin/promo/:id', wajibAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1518,15 +1426,11 @@ app.delete('/admin/promo/:id', wajibAdmin, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 7. REFUND WORKFLOW
-// ═══════════════════════════════════════════
-
-// 7a. POST /request-refund
-// User ajukan refund → buat doc 'refunds' + set order REFUND_REQUESTED
-app.post('/request-refund', async (req, res) => {
+// Pesanan jadi REFUND_REQUESTED, dokumen refund menunggu keputusan admin.
+app.post('/request-refund', wajibPengguna, async (req, res) => {
   try {
-    const { orderId, userId, alasan } = req.body;
+    const { orderId, alasan } = req.body;
+    const userId = req.pengguna.uid;
     if (!orderId || !alasan) {
       return res.status(400).json({ success: false, message: 'orderId dan alasan wajib disertakan' });
     }
@@ -1538,12 +1442,10 @@ app.post('/request-refund', async (req, res) => {
     }
     const orderData = orderDoc.data();
 
-    // Validasi kepemilikan
-    if (userId && orderData.userId !== userId) {
+    if (orderData.userId !== userId) {
       return res.status(403).json({ success: false, message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // Hanya order yang sudah dibayar (AKTIF/TERPAKAI) bisa diajukan refund
     if (!['AKTIF', 'TERPAKAI'].includes(orderData.status)) {
       return res.status(400).json({
         success: false,
@@ -1601,8 +1503,6 @@ app.post('/request-refund', async (req, res) => {
   }
 });
 
-// 7b. GET /admin/refunds
-// List semua request refund, support ?status=PENDING
 app.get('/admin/refunds', wajibAdmin, async (req, res) => {
   try {
     const { status } = req.query;
@@ -1619,9 +1519,8 @@ app.get('/admin/refunds', wajibAdmin, async (req, res) => {
   }
 });
 
-// 7c. POST /admin/refund/approve  (alias: POST /approve-refund)
-// Setujui refund: order -> REFUNDED, stok tiket dipulihkan (bila belum pernah discan),
-// refund -> APPROVED. Pengembalian uang dilakukan MANUAL oleh admin (TIDAK memanggil Midtrans).
+// Stok dipulihkan kalau tiket belum pernah discan. Pengembalian uang
+// dilakukan manual oleh admin, tidak ada panggilan ke Midtrans.
 async function handleRefundApprove(req, res) {
   try {
     const { refundId } = req.body;
@@ -1648,7 +1547,6 @@ async function handleRefundApprove(req, res) {
     }
     const orderData = orderDoc.data();
 
-    // Hanya pesanan yang sedang mengajukan refund yang boleh di-approve.
     if (!['REFUND_REQUESTED', 'REFUND_REQUIRED'].includes(orderData.status)) {
       return res.status(409).json({
         success: false,
@@ -1729,9 +1627,8 @@ async function handleRefundApprove(req, res) {
 app.post('/admin/refund/approve', wajibAdmin, handleRefundApprove);
 app.post('/approve-refund', wajibAdmin, handleRefundApprove); // alias kompatibilitas app lama
 
-// 7d. POST /admin/refund/reject  (alias: POST /reject-refund)
-// Tolak refund: refund -> REJECTED (+ alasan), order dikembalikan ke AKTIF (atau TERPAKAI
-// bila tiket sudah pernah discan) supaya tiket bisa dipakai/discan kembali.
+// Pesanan kembali AKTIF, atau TERPAKAI kalau tiketnya sudah pernah discan,
+// supaya tiket bisa dipakai lagi.
 async function handleRefundReject(req, res) {
   try {
     const { refundId, alasanReject } = req.body;
@@ -1761,7 +1658,7 @@ async function handleRefundReject(req, res) {
       const orderDoc = await orderRef.get();
       if (orderDoc.exists) {
         const od = orderDoc.data();
-        // Kembalikan ke TERPAKAI bila tiket sudah pernah discan, selain itu AKTIF.
+        // Tiket yang sudah discan kembali ke TERPAKAI, sisanya AKTIF.
         statusOrderBaru = od.tanggalDigunakan ? 'TERPAKAI' : 'AKTIF';
         await orderRef.update({
           status: statusOrderBaru,
@@ -1800,13 +1697,7 @@ async function handleRefundReject(req, res) {
 app.post('/admin/refund/reject', wajibAdmin, handleRefundReject);
 app.post('/reject-refund', wajibAdmin, handleRefundReject); // alias kompatibilitas app lama
 
-// ═══════════════════════════════════════════
-// 8. INVOICE
-// ═══════════════════════════════════════════
-
-// 8a. GET /invoice/:orderId
-// Generate invoice number (INV-SW-YYYY-XXXX) + return detail invoice
-app.get('/invoice/:orderId', async (req, res) => {
+app.get('/invoice/:orderId', wajibPengguna, async (req, res) => {
   try {
     const { orderId } = req.params;
     const orderRef = db.collection('orders').doc(orderId);
@@ -1815,8 +1706,10 @@ app.get('/invoice/:orderId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Pesanan tidak ditemukan' });
     }
     const orderData = orderDoc.data();
+    if (orderData.userId !== req.pengguna.uid) {
+      return res.status(403).json({ success: false, message: 'Invoice ini bukan milik akun Anda' });
+    }
 
-    // Generate / reuse invoice number
     let invoiceNumber = orderData.invoiceNumber;
     if (!invoiceNumber) {
       const year = new Date().getFullYear();
@@ -1828,7 +1721,7 @@ app.get('/invoice/:orderId', async (req, res) => {
       });
     }
 
-    // Ambil harga tiket authoritative dari tickets collection
+    // Harga diambil dari koleksi tickets, bukan dari total pesanan.
     let ticketPrice = 0;
     if (orderData.idTiket) {
       const ticketDoc = await db.collection('tickets').doc(orderData.idTiket).get();
@@ -1838,7 +1731,7 @@ app.get('/invoice/:orderId', async (req, res) => {
     }
     const qty = Number(orderData.jumlahTiket) || 1;
     if (!ticketPrice) {
-      // Fallback: derive dari totalHarga (minus biaya layanan 5000)
+      // Cadangan: turunkan dari totalHarga setelah dikurangi biaya layanan 5000.
       const derived = (Number(orderData.totalHarga) - 5000) / qty;
       if (derived > 0) ticketPrice = Math.round(derived);
     }
@@ -1853,7 +1746,6 @@ app.get('/invoice/:orderId', async (req, res) => {
     const ppn11 = Math.round(subtotal * 0.11);
     const total = subtotal + ppn11;
 
-    // Tanggal invoice: pakai createdAt order, fallback now
     let date = new Date().toISOString();
     if (orderData.createdAt) {
       try {
@@ -1881,17 +1773,13 @@ app.get('/invoice/:orderId', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════
-// 6. SAPU RESERVASI KEDALUWARSA (PENDING + RESERVED)
-// ═══════════════════════════════════════════
-// Jendela pembayaran HOLD_MENIT menit. Begitu lewat:
-//   PENDING  → EXPIRED (stok belum pernah dipotong → tidak ada yang dilepas)
-//   RESERVED → EXPIRED + stok dilepas SEKALI (ditandai stokDilepas)
-// Dulu penyapu hanya mengenal PENDING, sehingga pesanan RESERVED nyangkut
-// selamanya dan stoknya terkunci (kursi "hantu").
+// Lewat HOLD_MENIT menit, PENDING jadi EXPIRED tanpa melepas stok, sedangkan
+// RESERVED jadi EXPIRED dan stoknya dilepas sekali. Dulu penyapu hanya
+// mengenal PENDING, jadi pesanan RESERVED nyangkut dan stoknya terkunci.
 async function sapuReservasiKedaluwarsa(limit = 50) {
   const sekarang = admin.firestore.Timestamp.fromMillis(Date.now());
-  // Query satu field (reservedUntil) saja → tidak butuh composite index.
+  // Query hanya menyentuh satu field (reservedUntil), jadi tidak butuh
+  // composite index.
   const snap = await db.collection('orders')
     .where('reservedUntil', '<', sekarang)
     .limit(limit)
@@ -1970,7 +1858,7 @@ async function sapuReservasiKedaluwarsa(limit = 50) {
   return { diperiksa: snap.size, kedaluwarsa: selesai.length, stokDilepas };
 }
 
-app.post('/sweep-expired', async (req, res) => {
+app.post('/sweep-expired', wajibPengguna, async (req, res) => {
   try {
     const hasil = await sapuReservasiKedaluwarsa();
     log.note(res, `sapu reservasi · ${hasil.kedaluwarsa} kedaluwarsa · ${hasil.stokDilepas} stok dilepas`);
@@ -1981,18 +1869,14 @@ app.post('/sweep-expired', async (req, res) => {
   }
 });
 
-// Penyapu otomatis tiap 30 detik — app tidak perlu jadi penentu waktu.
+// Penyapu berjalan tiap 30 detik. Aplikasi tidak menentukan waktu.
 const sapuTimer = setInterval(() => {
   sapuReservasiKedaluwarsa().catch((e) => log.warn(`[sweep] ${e.message}`));
 }, 30000);
 if (sapuTimer.unref) sapuTimer.unref();
 
-// ═══════════════════════════════════════════
-// START SERVER
-// ═══════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
 
-// Daftar rute untuk ditampilkan di banner (urut sesuai alur pemakaian).
 const ROUTES = [
   { method: 'POST',   path: '/create-transaction' },
   { method: 'POST',   path: '/checkout-atomic' },

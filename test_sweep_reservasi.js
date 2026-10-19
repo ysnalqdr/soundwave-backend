@@ -5,10 +5,18 @@ const sa = require('./serviceAccountKey.json');
 admin.initializeApp({ credential: admin.credential.cert(sa) });
 const db = admin.firestore();
 const URL = 'http://localhost:3000/sweep-expired';
+const { ambilToken, pesanLewati } = require('./token_uji');
 
 const lapor = (ok, pesan) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${pesan}`);
 
 (async () => {
+  // Rute /sweep-expired dijaga token, jadi skrip ini butuh ID token.
+  const TOKEN = await ambilToken('zztest');
+  if (!TOKEN) {
+    pesanLewati('test_sweep_reservasi.js');
+    process.exit(0);
+  }
+
   const tiketSnap = await db.collection('tickets').limit(1).get();
   if (tiketSnap.empty) throw new Error('tidak ada tiket untuk diuji');
   const tiketDoc = tiketSnap.docs[0];
@@ -49,7 +57,10 @@ const lapor = (ok, pesan) => console.log(`${ok ? '[PASS]' : '[GAGAL]'} ${pesan}`
   });
 
   const panggilSweep = async () => {
-    const r = await fetch(URL, { method: 'POST' });
+    const r = await fetch(URL, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + TOKEN },
+    });
     return r.json();
   };
 

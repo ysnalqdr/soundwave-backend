@@ -36,7 +36,7 @@ log.request({ method: 'POST', path: '/rute-ngawur', status: 404, ms: 2, ref: '',
 log.warn('[SECURITY] harga tidak cocok pada pesanan SW-11223344');
 log.err('contoh baris error startup');
 
-// ─── pratinjau bagian tunnel (dari start_tunnel.js) ───
+// Pratinjau bagian tunnel, diambil dari start_tunnel.js.
 log.judul('SOUNDWAVE · server + tunnel');
 log.info('memeriksa server di port 3000…');
 log.ok('server sudah aktif (port 3000)');

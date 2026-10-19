@@ -52,4 +52,35 @@ async function wajibAdmin(req, res, next) {
   }
 }
 
-module.exports = { wajibAdmin };
+/**
+ * Penjaga rute pengguna biasa.
+ *
+ * Rute seperti /create-transaction dan /request-refund dulu menerima
+ * userId dari body permintaan, jadi siapa pun yang tahu ID orang lain
+ * bisa bertindak atas namanya. Sekarang identitas diambil dari ID token,
+ * bukan dari body.
+ */
+async function wajibPengguna(req, res, next) {
+  const kepala = req.headers.authorization || '';
+  const token = kepala.startsWith('Bearer ') ? kepala.slice(7).trim() : '';
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: 'Rute ini butuh login. Sertakan ID token Firebase.',
+    });
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.pengguna = { uid: decoded.uid, email: decoded.email || null };
+    return next();
+  } catch (e) {
+    return res.status(401).json({
+      success: false,
+      message: 'ID token tidak valid atau kedaluwarsa.',
+    });
+  }
+}
+
+module.exports = { wajibAdmin, wajibPengguna };

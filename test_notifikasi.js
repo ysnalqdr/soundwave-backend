@@ -26,6 +26,9 @@ const db = admin.firestore();
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 const SERVER_KEY = process.env.MIDTRANS_SERVER_KEY || '';
 const TAG = 'UJI-NOTIF-' + Date.now();
+const { ambilToken, pesanLewati } = require('./token_uji');
+
+let TOKEN = null;
 
 let lulus = 0, gagal = 0;
 const hasil = [];
@@ -38,7 +41,10 @@ const jeda = (ms) => new Promise((r) => setTimeout(r, ms));
 async function post(url, body) {
   const res = await fetch(BASE + url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}),
+    },
     body: JSON.stringify(body),
   });
   let json = null;
@@ -111,11 +117,18 @@ async function bersihkan() {
   console.log('Tag uji : ' + TAG + '\n');
 
   const userId = await cariUserId();
+
+  // Rute pengguna dijaga token, jadi ambil ID token untuk user uji ini.
+  TOKEN = await ambilToken(userId);
+  if (!TOKEN) {
+    pesanLewati('test_notifikasi.js');
+    process.exit(0);
+  }
   if (!userId) { console.log('Tidak ada user di Firestore — uji dibatalkan.'); process.exit(1); }
   console.log('userId uji: ' + userId.substring(0, 10) + '…\n');
 
   try {
-    // ── 1. PEMBAYARAN SUKSES (webhook settlement) ────────────────
+    // 1. Pembayaran sukses lewat webhook settlement.
     {
       const id = TAG + '-PAY';
       await buatOrderUji(id, 'RESERVED', userId);
@@ -145,7 +158,7 @@ async function bersihkan() {
       cek('notifikasi punya createdAt (server time)', !!notifs[0]?.createdAt);
     }
 
-    // ── 2. REFUND DIAJUKAN ───────────────────────────────────────
+    // 2. Refund diajukan.
     let refundId = null;
     {
       const id = TAG + '-REQ';
@@ -165,7 +178,7 @@ async function bersihkan() {
         notifs.length ? '"' + notifs[0].title + '"' : 'tidak ada notifikasi');
     }
 
-    // ── 3. REFUND DISETUJUI ──────────────────────────────────────
+    // 3. Refund disetujui.
     {
       const id = TAG + '-REQ';
       const r = await post('/admin/refund/approve', { refundId, orderId: id });
@@ -179,7 +192,7 @@ async function bersihkan() {
         notifs.length ? '"' + notifs[0].message + '"' : 'tidak ada notifikasi');
     }
 
-    // ── 4. REFUND DITOLAK ────────────────────────────────────────
+    // 4. Refund ditolak.
     {
       const id = TAG + '-REJ';
       await buatOrderUji(id, 'AKTIF', userId);
@@ -202,7 +215,7 @@ async function bersihkan() {
         notifs.length ? '"' + notifs[0].message + '"' : 'tidak ada notifikasi');
     }
 
-    // ── 5. IDEMPOTENSI: webhook berulang tidak dobel ─────────────
+    // 5. Webhook berulang tidak boleh menghasilkan notifikasi dobel.
     {
       const id = TAG + '-PAY';
       const statusCode = '200', gross = '1000';
@@ -226,7 +239,7 @@ async function bersihkan() {
     await bersihkan();
   }
 
-  // ── Verifikasi akhir: pastikan tidak ada sisa data uji ────────
+  // Verifikasi akhir: tidak ada sisa data uji.
   try {
     const sisaO = await db.collection('orders')
       .where('kodeBooking', '>=', TAG).where('kodeBooking', '<', TAG + '~').get();

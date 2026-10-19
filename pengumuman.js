@@ -1,31 +1,31 @@
 #!/usr/bin/env node
 /**
- * pengumuman.js — kirim PENGUMUMAN manual dari terminal.
+ * pengumuman.js — kirim pengumuman manual dari terminal.
  *
- * KONSEP: notifikasi di app itu PER-USER (1 dokumen = 1 orang). Jadi satu
- * pengumuman digandakan ke tiap user (fan-out) ke koleksi `notifications`
- * + push FCM ke HP-nya. Karena modelnya per-user, badge "belum dibaca" dan
- * tombol "Tandai semua" di app langsung jalan tanpa logika tambahan.
+ * Notifikasi di app bersifat per-user: satu dokumen untuk satu orang. Jadi
+ * satu pengumuman digandakan ke tiap user di koleksi `notifications` plus push
+ * FCM. Karena modelnya per-user, badge belum dibaca dan tombol tandai semua di
+ * app langsung bekerja tanpa logika tambahan.
  *
- * ── CARA PAKAI ──────────────────────────────────────────────────────
+ * CARA PAKAI
  *   node pengumuman.js
- *       interaktif: ditanya judul, pesan, target, lalu konfirmasi.
+ *       interaktif: judul, pesan, target, lalu konfirmasi.
  *
  *   node pengumuman.js "Judul" "Isi pesan"
- *       langsung ke SEMUA user (tetap ada konfirmasi).
+ *       langsung ke semua user, tetap ada konfirmasi.
  *
  *   node pengumuman.js "Judul" "Isi" --uid=UID
  *   node pengumuman.js "Judul" "Isi" --email=nama@email.com
  *       hanya satu user.
  *
- *   --ya            lewati konfirmasi (untuk skrip otomatis)
- *   --dry           uji coba: hitung target saja, TIDAK mengirim apa pun
- *   --tanpa-push    masuk inbox saja, HP tidak bergetar
- *   --termasuk-admin  ikut kirim ke akun admin (default: hanya role user)
- *   --help          tampilkan bantuan
+ *   --ya              lewati konfirmasi
+ *   --dry             uji coba: hitung target saja, tidak mengirim
+ *   --tanpa-push      masuk inbox saja, HP tidak bergetar
+ *   --termasuk-admin  ikut kirim ke akun admin, default hanya role user
+ *   --help            tampilkan bantuan
  *
  * Tulis \n di dalam pesan untuk membuat baris baru.
- * Tidak butuh server.js hidup — script ini bicara langsung ke Firebase.
+ * Tidak butuh server.js hidup, skrip ini bicara langsung ke Firebase.
  */
 'use strict';
 
@@ -40,9 +40,7 @@ const LEBAR = 58;
 const GARIS = '─'.repeat(LEBAR);
 const ADMIN_ROLES = ['admin', 'super_admin'];
 
-// ═══════════════════════════════════════════════════════════════════
-// TAMPILAN (gaya "Terminal Pro": satu aksen hijau, kolom sejajar)
-// ═══════════════════════════════════════════════════════════════════
+// Tampilan: satu aksen hijau, kolom sejajar.
 function judulBanner(sub) {
   const isi = (t) => '│' + '  ' + pad(t, LEBAR - 4) + '  ' + '│';
   console.log('');
@@ -83,9 +81,7 @@ function bantuan() {
   console.log('');
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// ARGUMEN
-// ═══════════════════════════════════════════════════════════════════
+// Argumen
 function bacaArgumen(argv) {
   const f = { push: true, dry: false, ya: false, termasukAdmin: false, uid: null, email: null, bantuan: false };
   const posisi = [];
@@ -104,9 +100,7 @@ function bacaArgumen(argv) {
   return f;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// TARGET
-// ═══════════════════════════════════════════════════════════════════
+// Target
 async function ambilSemuaUser(db) {
   const snap = await db.collection(KOLEKSI_USER).get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
@@ -134,9 +128,7 @@ async function tentukanTarget(db, f) {
 
 const labelUser = (u) => u.email || u.nama || u.name || u.id;
 
-// ═══════════════════════════════════════════════════════════════════
-// INTERAKTIF
-// ═══════════════════════════════════════════════════════════════════
+// Interaktif
 function tanya(rl, label) {
   return new Promise((resolve) => rl.question(label, (a) => resolve(String(a || '').trim())));
 }
@@ -190,9 +182,7 @@ async function konfirmasi(f, target, db) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// PENGIRIMAN
-// ═══════════════════════════════════════════════════════════════════
+// Pengiriman
 const UKURAN_BAGIAN = 20; // kirim 20 user paralel sekali jalan
 
 async function sebar(pengirim, target, f) {
@@ -246,14 +236,12 @@ function ringkasan(hasil, jumlahTarget, push) {
   console.log('');
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// MAIN
-// ═══════════════════════════════════════════════════════════════════
+// Alur utama
 async function main() {
   const f = bacaArgumen(process.argv.slice(2));
   if (f.bantuan) return bantuan();
 
-  // ── kredensial Firebase (cara sama seperti server.js) ──
+  // Kredensial Firebase, caranya sama seperti server.js.
   try { require('dotenv').config({ quiet: true }); } catch (_) { /* opsional */ }
   try {
     let credential;
@@ -293,7 +281,7 @@ async function main() {
 
   if (!interaktif) judulBanner('mode satu baris perintah');
 
-  // ── target ──
+  // Target
   let target;
   try {
     target = await tentukanTarget(db, f);
@@ -308,7 +296,7 @@ async function main() {
     return;
   }
 
-  // ── uji coba ──
+  // Uji coba
   if (f.dry) {
     console.log('  ' + paint.dim('MODE UJI COBA (--dry) — tidak ada yang dikirim'));
     console.log('');
@@ -322,7 +310,7 @@ async function main() {
     return;
   }
 
-  // ── konfirmasi ──
+  // Konfirmasi
   if (!f.ya) {
     const setuju = await konfirmasi(f, target, db);
     if (!setuju) {
@@ -333,7 +321,7 @@ async function main() {
     console.log('');
   }
 
-  // ── kirim ──
+  // Kirim
   console.log('  ' + GARIS);
   const hasil = await sebar(pengirim, target, f);
   ringkasan(hasil, target.length, f.push);
