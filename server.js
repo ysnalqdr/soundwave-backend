@@ -16,6 +16,7 @@ const midtransClient = require('midtrans-client');
 const admin = require('firebase-admin');
 const log = require('./logger');
 const { buatPengirim } = require('./notifikasi');
+const { wajibAdmin } = require('./auth_admin');
 
 // ─── Load .env ───
 require('dotenv').config ? require('dotenv').config({ quiet: true }) : (() => {
@@ -1440,7 +1441,7 @@ app.post('/validate-promo', async (req, res) => {
 
 // 6b. POST /admin/promo
 // Buat kode promo baru
-app.post('/admin/promo', async (req, res) => {
+app.post('/admin/promo', wajibAdmin, async (req, res) => {
   try {
     const { kode, tipe, nilai, idKonser, minPembelian, maxPakai, berlakuMulai, berlakuAkhir, deskripsi } = req.body;
     if (!kode || !tipe || nilai === undefined) {
@@ -1484,7 +1485,7 @@ app.post('/admin/promo', async (req, res) => {
 
 // 6c. GET /admin/promos
 // List semua kode promo
-app.get('/admin/promos', async (req, res) => {
+app.get('/admin/promos', wajibAdmin, async (req, res) => {
   try {
     const snapshot = await db.collection('promo_codes').get();
     const promos = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -1497,7 +1498,7 @@ app.get('/admin/promos', async (req, res) => {
 
 // 6d. DELETE /admin/promo/:id
 // Nonaktifkan kode promo (aktif=false)
-app.delete('/admin/promo/:id', async (req, res) => {
+app.delete('/admin/promo/:id', wajibAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const promoRef = db.collection('promo_codes').doc(id);
@@ -1602,7 +1603,7 @@ app.post('/request-refund', async (req, res) => {
 
 // 7b. GET /admin/refunds
 // List semua request refund, support ?status=PENDING
-app.get('/admin/refunds', async (req, res) => {
+app.get('/admin/refunds', wajibAdmin, async (req, res) => {
   try {
     const { status } = req.query;
     let query = db.collection('refunds');
@@ -1725,8 +1726,8 @@ async function handleRefundApprove(req, res) {
   }
 }
 
-app.post('/admin/refund/approve', handleRefundApprove);
-app.post('/approve-refund', handleRefundApprove); // alias kompatibilitas app lama
+app.post('/admin/refund/approve', wajibAdmin, handleRefundApprove);
+app.post('/approve-refund', wajibAdmin, handleRefundApprove); // alias kompatibilitas app lama
 
 // 7d. POST /admin/refund/reject  (alias: POST /reject-refund)
 // Tolak refund: refund -> REJECTED (+ alasan), order dikembalikan ke AKTIF (atau TERPAKAI
@@ -1796,8 +1797,8 @@ async function handleRefundReject(req, res) {
   }
 }
 
-app.post('/admin/refund/reject', handleRefundReject);
-app.post('/reject-refund', handleRefundReject); // alias kompatibilitas app lama
+app.post('/admin/refund/reject', wajibAdmin, handleRefundReject);
+app.post('/reject-refund', wajibAdmin, handleRefundReject); // alias kompatibilitas app lama
 
 // ═══════════════════════════════════════════
 // 8. INVOICE
@@ -1877,137 +1878,6 @@ app.get('/invoice/:orderId', async (req, res) => {
   } catch (err) {
     log.fail(res, 'invoice', err);
     res.status(500).json({ success: false, message: 'Gagal membuat invoice: ' + (err.message || err) });
-  }
-});
-
-// ═══════════════════════════════════════════
-// 9. SEAT SELECTION
-// ═══════════════════════════════════════════
-
-// 9a. GET /seat-layout/:idKonser
-// Merge seat_layouts + booked_seats → status tiap kursi
-app.get('/seat-layout/:idKonser', async (req, res) => {
-  try {
-    const { idKonser } = req.params;
-    const layoutRef = db.collection('seat_layouts').doc(idKonser);
-    const layoutDoc = await layoutRef.get();
-    if (!layoutDoc.exists) {
-      return res.json({ hasLayout: false });
-    }
-    const layoutData = layoutDoc.data();
-
-    // Fetch booked seats
-    const bookedRef = db.collection('booked_seats').doc(idKonser);
-    const bookedDoc = await bookedRef.get();
-    const bookedSet = new Set();
-    if (bookedDoc.exists) {
-      const bd = bookedDoc.data();
-      const arr = bd.seats || bd.bookedSeats || [];
-      if (Array.isArray(arr)) arr.forEach(s => bookedSet.add(s));
-    }
-
-    const kategori = (layoutData.kategori || []).map(kat => {
-      const kursi = (kat.kursi || []).map(seat => {
-        const id = typeof seat === 'string' ? seat : (seat.id || seat.kode || null);
-        const status = id && bookedSet.has(id) ? 'booked' : 'available';
-        return { id, status };
-      });
-      return {
-        nama: kat.nama || null,
-        zona: kat.zona || null,
-        harga: Number(kat.harga) || 0,
-        kursi,
-      };
-    });
-
-    res.json({ kategori, hasLayout: true });
-  } catch (err) {
-    log.fail(res, 'seat-layout', err);
-    res.status(500).json({ success: false, message: 'Gagal mengambil layout kursi: ' + (err.message || err) });
-  }
-});
-
-// 9b. POST /reserve-seats
-// Atomic booking multiple seats dalam 1 Firestore transaction
-app.post('/reserve-seats', async (req, res) => {
-  try {
-    const { idKonser, seats, orderId } = req.body;
-    if (!idKonser || !Array.isArray(seats) || seats.length === 0) {
-      return res.status(400).json({ success: false, message: 'idKonser dan seats wajib disertakan' });
-    }
-
-    const bookedRef = db.collection('booked_seats').doc(idKonser);
-    let conflict = false;
-
-    await db.runTransaction(async (transaction) => {
-      const bookedDoc = await transaction.get(bookedRef);
-      const data = bookedDoc.exists ? bookedDoc.data() : {};
-      const currentList = data.seats || data.bookedSeats || [];
-      const currentSet = new Set(currentList);
-
-      // Cek semua seat belum dibooked
-      for (const s of seats) {
-        if (currentSet.has(s)) {
-          conflict = true;
-          return; // abort transaction tanpa write
-        }
-      }
-      if (conflict) return;
-
-      // Book all atomically
-      const merged = currentList.concat(seats);
-      if (bookedDoc.exists) {
-        transaction.update(bookedRef, {
-          seats: merged,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      } else {
-        transaction.set(bookedRef, {
-          seats: merged,
-          idKonser,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-      }
-    });
-
-    if (conflict) {
-      return res.status(409).json({ success: false, error: 'Seats already booked' });
-    }
-
-    log.note(res, `kursi dikunci · ${seats.join(', ')}`);
-    res.json({ success: true, seats });
-  } catch (err) {
-    log.fail(res, 'reserve-seats', err);
-    res.status(500).json({ success: false, message: 'Gagal reserve kursi: ' + (err.message || err) });
-  }
-});
-
-// 9c. DELETE /release-seats
-// Lepaskan booking seats dari booked_seats doc
-app.delete('/release-seats', async (req, res) => {
-  try {
-    const { idKonser, seats } = req.body;
-    if (!idKonser || !Array.isArray(seats) || seats.length === 0) {
-      return res.status(400).json({ success: false, message: 'idKonser dan seats wajib disertakan' });
-    }
-
-    const bookedRef = db.collection('booked_seats').doc(idKonser);
-    const bookedDoc = await bookedRef.get();
-    if (!bookedDoc.exists) {
-      return res.json({ success: true, message: 'Tidak ada booking untuk dilepas' });
-    }
-
-    await bookedRef.update({
-      seats: admin.firestore.FieldValue.arrayRemove(...seats),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    log.note(res, `kursi dilepas · ${seats.join(', ')}`);
-    res.json({ success: true, seats });
-  } catch (err) {
-    log.fail(res, 'release-seats', err);
-    res.status(500).json({ success: false, message: 'Gagal melepas kursi: ' + (err.message || err) });
   }
 });
 
@@ -2143,9 +2013,6 @@ const ROUTES = [
   { method: 'GET',    path: '/admin/promos' },
   { method: 'DELETE', path: '/admin/promo/:id' },
   { method: 'GET',    path: '/invoice/:orderId' },
-  { method: 'GET',    path: '/seat-layout/:idKonser' },
-  { method: 'POST',   path: '/reserve-seats' },
-  { method: 'DELETE', path: '/release-seats' },
   { method: 'POST',   path: '/sync-offline-scans' },
 ];
 

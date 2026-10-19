@@ -4,11 +4,37 @@
 //
 // Jalankan: node test_refund_flow.js   (server.js harus hidup di :3000)
 const admin = require('firebase-admin');
+try { require('dotenv').config({ quiet: true }); } catch {}
 
 admin.initializeApp({
   credential: admin.credential.cert(require('./serviceAccountKey.json')),
 });
 const db = admin.firestore();
+
+const WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || '';
+
+// Rute /admin/* dijaga auth_admin.js, jadi wajib Bearer ID token milik admin.
+// Skrip ini membuat custom token lewat Admin SDK, menukarnya jadi ID token
+// lewat REST, lalu memakai token itu untuk semua permintaan di bawah.
+let TOKEN_ADMIN = null;
+
+async function siapkanToken() {
+  if (!WEB_API_KEY) return null;
+  const snap = await db.collection('users').where('role', '==', 'admin').limit(1).get();
+  const uid = !snap.empty ? snap.docs[0].id : null;
+  if (!uid) return null;
+  const custom = await admin.auth().createCustomToken(uid);
+  const res = await fetch(
+    'https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=' + WEB_API_KEY,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: custom, returnSecureToken: true }),
+    },
+  );
+  const json = await res.json();
+  return json.idToken || null;
+}
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 const TAG = 'ZZTEST_' + Date.now();
@@ -25,7 +51,10 @@ function check(name, cond, extra = '') {
 async function post(p, body) {
   const res = await fetch(BASE + p, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(TOKEN_ADMIN ? { Authorization: 'Bearer ' + TOKEN_ADMIN } : {}),
+    },
     body: JSON.stringify(body),
   });
   const txt = await res.text();
@@ -59,6 +88,13 @@ async function getTicket() { return (await db.collection('tickets').doc(ticketId
 
 (async () => {
   try {
+    TOKEN_ADMIN = await siapkanToken();
+    if (!TOKEN_ADMIN) {
+      console.log('LEWATI: FIREBASE_WEB_API_KEY kosong atau tidak ada user ber-role admin.');
+      console.log('Rute /admin/* wajib Bearer ID token, jadi uji refund butuh keduanya.');
+      return;
+    }
+
     await seed();
 
     // ── A. REJECT ────────────────────────────────────────────────
