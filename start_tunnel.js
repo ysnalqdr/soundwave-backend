@@ -50,8 +50,61 @@ function checkServerRunning() {
 }
 
 (async () => {
-  const isRunning = await checkServerRunning();
   let server = null;
+
+  // ---------------------------------------------------------------
+  // Bersihkan server lama sebelum memulai.
+  //
+  // Tanpa ini, menjalankan START_SOUNDWAVE.bat dua kali menghasilkan
+  // jendela yang terlihat "mati": skrip mendeteksi port 3000 sudah
+  // terpakai, melewati spawn, sehingga TIDAK ada banner dan TIDAK ada log
+  // request — padahal servernya hidup di jendela/jendela lama. Semua
+  // aktivitas login dan pembayaran muncul di sana, bukan di sini.
+  //
+  // Yang dimatikan hanya proses `node server.js` milik proyek ini. Proses
+  // lain yang kebetulan memakai port 3000 tidak disentuh.
+  async function bebaskanPort() {
+    const pid = await new Promise((resolve) => {
+      const { exec } = require('child_process');
+      exec('netstat -ano -p tcp', (err, out) => {
+        if (err || !out) return resolve(null);
+        const semua = out.split(String.fromCharCode(10));
+        const baris = semua.find(
+          (b) => b.includes(':3000') && b.includes('LISTENING'),
+        );
+        if (!baris) return resolve(null);
+        const bagian = baris.trim().split(/\s+/);
+        resolve(bagian[bagian.length - 1] || null);
+      });
+    });
+    if (!pid) return;
+
+    const cmd = await new Promise((resolve) => {
+      const { exec } = require('child_process');
+      exec(
+        'powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter ' +
+          '\\"ProcessId=' + pid + '\\").CommandLine"',
+        (err, out) => resolve(err ? '' : String(out || '')),
+      );
+    });
+
+    if (!cmd.includes('server.js')) {
+      log.warn(`port 3000 dipakai proses lain (PID ${pid}) — tidak disentuh`);
+      return;
+    }
+
+    log.warn(`server lama masih jalan (PID ${pid}) — dimatikan dulu`);
+    await new Promise((resolve) => {
+      const { exec } = require('child_process');
+      exec(`taskkill /PID ${pid} /F`, () => resolve());
+    });
+    // Beri waktu OS melepas port.
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+
+  await bebaskanPort();
+
+  const isRunning = await checkServerRunning();
   if (!isRunning) {
     server = spawn('node', ['server.js'], {
       cwd: __dirname,
@@ -61,7 +114,9 @@ function checkServerRunning() {
     server.on('error', (err) => log.err('gagal menjalankan server: ' + err.message));
     log.ok('server dijalankan (port 3000)');
   } else {
-    log.ok('server sudah aktif (port 3000)');
+    log.warn('port 3000 masih dipakai proses lain');
+    log.warn('log request TIDAK akan muncul di jendela ini.');
+    log.info('tutup proses itu dulu:  taskkill /PID <pid> /F');
   }
 
   // 3. Jalankan Cloudflare Tunnel
@@ -83,11 +138,24 @@ async function onTunnelOutput(chunk) {
     log.ok('tunnel aktif  ·  ' + tunnelUrl);
 
     try {
-      await db.collection('events').doc('_backend_config').set({
+      // Simpan ke DUA lokasi.
+      //
+      // `app_config/backend` adalah lokasi yang dibaca aplikasi sejak Okt
+      // 2026. `events/_backend_config` tetap ditulis sebagai cadangan supaya
+      // APK versi lama (yang belum tahu lokasi baru) masih bisa dipakai.
+      //
+      // Sebelumnya skrip ini HANYA menulis ke lokasi lama. Karena URL tunnel
+      // Cloudflare berubah setiap kali dijalankan, `app_config/backend`
+      // menyimpan URL BASI — dan aplikasi mendahulukan lokasi itu, sehingga
+      // mencoba menghubungi tunnel yang sudah mati. Itu penyebab "server
+      // pembayaran tidak bisa dihubungi" padahal backend hidup.
+      const data = {
         url: tunnelUrl,
         updatedAt: new Date().toISOString()
-      }, { merge: true });
-      log.info('URL disimpan ke Firebase (events/_backend_config)');
+      };
+      await db.collection('app_config').doc('backend').set(data, { merge: true });
+      await db.collection('events').doc('_backend_config').set(data, { merge: true });
+      log.info('URL disimpan ke Firebase (app_config/backend + events/_backend_config)');
       log.info('HP dengan kuota data apa pun sudah bisa order tiket');
     } catch (e) {
       log.err('gagal simpan URL ke Firebase: ' + e.message);
