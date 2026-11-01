@@ -14,6 +14,13 @@ const log = require('./logger');
 const { buatPengirim } = require('./notifikasi');
 const { wajibAdmin, wajibPengguna } = require('./auth_admin');
 const { headerKeamanan, batasiLaju } = require('./keamanan_http');
+const {
+  hitungRincianHarga,
+  hitungDiskonVoucher,
+  normalkanTipe,
+  TARIF_PAJAK_PERSEN,
+  TARIF_LAYANAN_PERSEN,
+} = require('./perhitungan_harga');
 
 require('dotenv').config ? require('dotenv').config({ quiet: true }) : (() => {
   // Kalau dotenv belum terpasang, .env dibaca manual.
@@ -262,16 +269,95 @@ app.post('/create-transaction', wajibPengguna, async (req, res) => {
       authoritativePrice = Number(ticketData.harga) || 0;
     }
 
-    const serviceFee = 5000;
-    const authoritativeTotal = authoritativePrice > 0
-      ? (authoritativePrice * orderData.jumlahTiket) + serviceFee
-      : Math.round(orderData.totalHarga);
+    // ---------------------------------------------------------------
+    // Hitung ulang total dari HARGA DATABASE, termasuk voucher, pajak,
+    // dan biaya layanan.
+    //
+    // Sebelumnya blok ini memakai `harga x jumlah + 5000` saja lalu MENIMPA
+    // totalHarga klien. Akibatnya voucher yang dipilih pembeli hilang tepat
+    // saat pembayaran dimulai: layar menampilkan Rp 95.000, Midtrans menagih
+    // Rp 105.000. Rumusnya sekarang satu, dicerminkan dari
+    // `lib/utils/rincian_harga.dart`.
+    // ---------------------------------------------------------------
+    const subtotal = Math.round(authoritativePrice * orderData.jumlahTiket);
 
-    // Harga dari klien ditimpa harga database.
-    if (Math.round(orderData.totalHarga) !== authoritativeTotal) {
-      log.warn(`[SECURITY] Price mismatch order ${orderId}. Expected ${authoritativeTotal}, got ${orderData.totalHarga}`);
+    // Validasi voucher: kode harus ada, aktif, dalam masa berlaku, dan
+    // kuotanya belum habis. Potongan dihitung dari subtotal hasil hitung
+    // ulang — bukan dari angka kiriman klien.
+    let diskonSah = 0;
+    let promoDoc = null;
+    if (orderData.kodePromo) {
+      const promoSnap = await db
+        .collection('promo_codes')
+        .where('kode', '==', String(orderData.kodePromo).trim().toUpperCase())
+        .limit(1)
+        .get();
+
+      if (!promoSnap.empty) {
+        promoDoc = { id: promoSnap.docs[0].id, ...promoSnap.docs[0].data() };
+        const sekarang = Date.now();
+        const mulai = promoDoc.berlakuMulai && promoDoc.berlakuMulai.toDate
+          ? promoDoc.berlakuMulai.toDate().getTime()
+          : new Date(promoDoc.berlakuMulai || 0).getTime();
+        const akhir = promoDoc.berlakuAkhir && promoDoc.berlakuAkhir.toDate
+          ? promoDoc.berlakuAkhir.toDate().getTime()
+          : new Date(promoDoc.berlakuAkhir || 0).getTime();
+
+        const masihBerlaku = promoDoc.aktif !== false
+          && sekarang >= mulai
+          && sekarang <= akhir
+          && (Number(promoDoc.sudahDipakai) || 0) < (Number(promoDoc.maxPakai) || 100);
+
+        if (masihBerlaku) {
+          const v = hitungDiskonVoucher(promoDoc, subtotal);
+          diskonSah = v.diskon;
+          if (v.alasan) {
+            log.warn(`[VOUCHER] ${orderData.kodePromo}: ${v.alasan}`);
+          }
+        } else {
+          log.warn(`[VOUCHER] ${orderData.kodePromo} tidak berlaku (waktu/kuota/aktif)`);
+        }
+      } else {
+        log.warn(`[VOUCHER] kode ${orderData.kodePromo} tidak ditemukan`);
+      }
+    }
+
+    const rincian = hitungRincianHarga(
+      authoritativePrice,
+      orderData.jumlahTiket,
+      diskonSah,
+    );
+    const authoritativeTotal = rincian.total;
+
+    // Simpan rincian supaya struk bisa menampilkan komponennya dan refund
+    // bisa dihitung ulang dengan benar.
+    const rincianUntukSimpan = {
+      subtotal: rincian.subtotal,
+      kodePromo: diskonSah > 0 ? String(orderData.kodePromo).toUpperCase() : null,
+      diskon: rincian.diskon,
+      pajak: rincian.pajak,
+      biayaLayananPersen: rincian.layananPersen,
+      biayaLayananTetap: rincian.layananTetap,
+      totalHarga: authoritativeTotal,
+    };
+
+    // Harga dari klien ditimpa hasil hitung ulang server.
+    const bedaTotal = Math.round(Number(orderData.totalHarga) || 0) !== authoritativeTotal;
+    const bedaDiskon = Math.round(Number(orderData.diskon) || 0) !== rincian.diskon;
+    if (bedaTotal || bedaDiskon) {
+      log.warn(
+        `[SECURITY] Price mismatch order ${orderId}. ` +
+        `Expected total ${authoritativeTotal} (diskon ${rincian.diskon}), ` +
+        `got total ${orderData.totalHarga} (diskon ${orderData.diskon || 0})`,
+      );
       await orderRef.update({
-        totalHarga: authoritativeTotal,
+        ...rincianUntukSimpan,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else if (orderData.kodePromo && !orderData.subtotal) {
+      // Pesanan lama dari aplikasi versi sebelumnya: belum punya rincian.
+      await orderRef.update({
+        ...rincianUntukSimpan,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
@@ -290,22 +376,54 @@ app.post('/create-transaction', wajibPengguna, async (req, res) => {
         order_id: orderData.kodeBooking || orderId,
         gross_amount: authoritativeTotal,
       },
-      item_details: [
-        {
-          id: orderData.idTiket || orderData.idKonser,
-          price: authoritativePrice > 0
-            ? authoritativePrice
-            : Math.round((authoritativeTotal - serviceFee) / orderData.jumlahTiket),
-          quantity: orderData.jumlahTiket,
-          name: `${orderData.judulKonser} (${orderData.kategoriTiket})`.substring(0, 50),
-        },
-        {
-          id: 'BIAYA-ADMIN',
-          price: serviceFee,
-          quantity: 1,
-          name: 'Biaya Layanan & Pemeliharaan',
-        },
-      ],
+      // Rincian item HARUS berjumlah tepat sama dengan gross_amount,
+      // kalau tidak Midtrans menolak transaksi. Karena itu komponennya
+      // diturunkan dari `rincian` yang sama dengan total — bukan dihitung
+      // ulang di sini. Struk Midtrans juga jadi transparan: pembeli melihat
+      // harga tiket, potongan voucher, pajak, dan biaya layanan terpisah.
+      item_details: authoritativePrice > 0
+        ? [
+            {
+              id: orderData.idTiket || orderData.idKonser,
+              price: authoritativePrice,
+              quantity: orderData.jumlahTiket,
+              name: `${orderData.judulKonser} (${orderData.kategoriTiket})`.substring(0, 50),
+            },
+            ...(rincian.diskon > 0
+              ? [{
+                  id: 'DISKON',
+                  price: -rincian.diskon,
+                  quantity: 1,
+                  name: `Potongan ${String(orderData.kodePromo).toUpperCase()}`.substring(0, 50),
+                }]
+              : []),
+            {
+              id: 'PAJAK',
+              price: rincian.pajak,
+              quantity: 1,
+              name: `Pajak Hiburan ${TARIF_PAJAK_PERSEN}%`,
+            },
+            {
+              id: 'LAYANAN-PERSEN',
+              price: rincian.layananPersen,
+              quantity: 1,
+              name: `Biaya Layanan ${TARIF_LAYANAN_PERSEN}%`,
+            },
+            {
+              id: 'LAYANAN-TETAP',
+              price: rincian.layananTetap,
+              quantity: 1,
+              name: 'Biaya Layanan',
+            },
+          ]
+        : [
+            {
+              id: orderData.idKonser || orderId,
+              price: authoritativeTotal,
+              quantity: 1,
+              name: `${orderData.judulKonser}`.substring(0, 50),
+            },
+          ],
       customer_details: {
         first_name: orderData.namaPembeli,
         email: orderData.emailPembeli,
@@ -1106,6 +1224,31 @@ app.post('/midtrans-webhook', async (req, res) => {
       notifUntukDikirim = finalStatus;
     });
 
+    // Kuota voucher baru berkurang saat pembayaran BENAR-BENAR lunas.
+    //
+    // Sebelumnya `sudahDipakai` tidak pernah bertambah di mana pun, jadi
+    // voucher berkuota 10 bisa dipakai tanpa batas. Penambahan dilakukan di
+    // luar transaksi utama supaya kegagalan di sini tidak membatalkan tiket
+    // yang sudah aktif — pemakaian voucher yang tercatat telat jauh lebih
+    // ringan daripada tiket yang gagal terbit.
+    if (notifUntukDikirim === 'AKTIF' && currentOrder.kodePromo) {
+      try {
+        const promoRef = db
+          .collection('promo_codes')
+          .where('kode', '==', String(currentOrder.kodePromo).toUpperCase())
+          .limit(1);
+        const promoSnap = await promoRef.get();
+        if (!promoSnap.empty) {
+          await promoSnap.docs[0].ref.update({
+            sudahDipakai: admin.firestore.FieldValue.increment(1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (e) {
+        log.warn(`[VOUCHER] gagal menambah kuota terpakai: ${e.message}`);
+      }
+    }
+
     // Notifikasi in-app, non-fatal.
     if (notifUntukDikirim === 'AKTIF') {
       await kirimNotifikasi(currentOrder.userId, {
@@ -1330,22 +1473,53 @@ app.post('/validate-promo', wajibPengguna, async (req, res) => {
       });
     }
 
+    // Tipe dinormalkan: aplikasi menulis 'percentage'/'fixed', endpoint
+    // lama memakai 'persen'/'nominal'. Tanpa normalisasi, voucher 50%
+    // dianggap potongan Rp 50.
     const nilai = Number(promo.nilai) || 0;
-    const tipe = promo.tipe; // 'persen' | 'nominal'
-    let discountAmount = 0;
-    if (tipe === 'persen') {
-      discountAmount = Math.round((subtotalNum * nilai) / 100);
-    } else {
-      discountAmount = Math.min(nilai, subtotalNum);
-    }
+    const tipe = normalkanTipe(promo.tipe);
+    const { diskon: discountAmount } = hitungDiskonVoucher(promo, subtotalNum);
 
     log.note(res, `promo valid · diskon Rp${discountAmount}`);
+
+    // Kembalikan objek promo LENGKAP, bukan hanya angka potongan.
+    //
+    // Aplikasi memakai respons ini untuk menyimpan voucher ke
+    // `users/{uid}/claimed_promos` saat kode diketik manual (auto-claim).
+    // Tanpa `berlakuAkhir`, `minPembelian`, dan `maxPakai`, voucher yang
+    // tersimpan akan cacat: tanggal kedaluwarsa kosong, dan syarat minimum
+    // belanja hilang — sehingga Diskon Saya menampilkan voucher yang
+    // seolah-olah berlaku selamanya.
+    //
+    // `discountAmount` juga dikirim sebagai angka final supaya klien tidak
+    // menghitung ulang dan menghasilkan selisih pembulatan.
+    const keIso = (v) => {
+      if (!v) return null;
+      const d = v.toDate ? v.toDate() : new Date(v);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    };
+
     res.json({
       valid: true,
       tipe,
       nilai,
       discountAmount,
       deskripsi: promo.deskripsi || null,
+      promo: {
+        id: promoDoc.id,
+        kode: promo.kode || kode,
+        tipe,
+        nilai,
+        minPembelian: Number(promo.minPembelian) || 0,
+        maxPakai: Number(promo.maxPakai) || 0,
+        sudahDipakai: Number(promo.sudahDipakai) || 0,
+        berlakuMulai: keIso(promo.berlakuMulai),
+        berlakuAkhir: keIso(promo.berlakuAkhir),
+        deskripsi: promo.deskripsi || null,
+        tema: promo.tema || null,
+        gambarUrl: promo.gambarUrl || null,
+        idKonser: promo.idKonser || null,
+      },
     });
   } catch (err) {
     log.fail(res, 'validate-promo', err);
@@ -1359,9 +1533,9 @@ app.post('/admin/promo', wajibAdmin, async (req, res) => {
     if (!kode || !tipe || nilai === undefined) {
       return res.status(400).json({ success: false, message: 'kode, tipe, nilai wajib disertakan' });
     }
-    if (!['persen', 'nominal'].includes(tipe)) {
-      return res.status(400).json({ success: false, message: "tipe harus 'persen' atau 'nominal'" });
-    }
+    // Terima kosakata lama ('persen'/'nominal') maupun yang dipakai
+    // aplikasi ('percentage'/'fixed'), lalu simpan dalam bentuk baku.
+    const tipeBaku = normalkanTipe(tipe);
 
     const promoRef = db.collection('promo_codes').doc(kode);
     const existing = await promoRef.get();
@@ -1371,7 +1545,7 @@ app.post('/admin/promo', wajibAdmin, async (req, res) => {
 
     const docData = {
       kode,
-      tipe,
+      tipe: tipeBaku,
       nilai: Number(nilai) || 0,
       idKonser: idKonser || null,
       minPembelian: Number(minPembelian) || 0,
